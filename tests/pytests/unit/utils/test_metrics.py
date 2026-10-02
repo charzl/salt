@@ -576,3 +576,55 @@ def test_forked_children_get_distinct_instance_ids_and_ports():
     ports = {r[2] for r in results}
     assert len(ports) == 3
     assert ports == {base + 1, base + 2, base + 3}
+
+
+def _scrape_child(base, queue):
+    import urllib.request
+
+    try:
+        metrics.configure(
+            {
+                "metrics": {
+                    "enabled": True,
+                    "exporter": "prometheus",
+                    "prometheus": {"host": "127.0.0.1", "port": base, "port_range": 4},
+                },
+                "__metrics_instance": {"id": "mworker-default-0", "index": 1},
+            }
+        )
+        metrics.counter("salt.test.child_only").add(5)
+        with urllib.request.urlopen(f"http://127.0.0.1:{base + 1}/metrics") as resp:
+            queue.put(resp.read().decode())
+    except Exception as exc:  # pylint: disable=broad-except
+        queue.put(f"error: {exc!r}")
+
+
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(), reason="needs fork"
+)
+def test_forked_child_does_not_serve_parent_series():
+    """
+    A fork child inherits the parent's reader.  Its port must only expose
+    its own series, not a stale copy of the parent's.
+    """
+    base = _free_port_block(4)
+    metrics.configure(
+        {
+            "metrics": {
+                "enabled": True,
+                "exporter": "prometheus",
+                "prometheus": {"host": "127.0.0.1", "port": base, "port_range": 4},
+            },
+            "__metrics_instance": {"id": "master-main", "index": 0},
+        }
+    )
+    metrics.counter("salt.test.parent_only").add(1)
+    ctx = multiprocessing.get_context("fork")
+    queue = ctx.Queue()
+    proc = ctx.Process(target=_scrape_child, args=(base, queue))
+    proc.start()
+    body = queue.get(timeout=30)
+    proc.join(timeout=10)
+    assert "salt_test_child_only" in body, body[:500]
+    assert "salt_test_parent_only" not in body, body[:500]
+    assert body.count("target_info{") == 1, body[:800]

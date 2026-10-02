@@ -141,6 +141,9 @@ _cached_opts = None
 _atexit_registered = False
 # Track the Prometheus HTTP server thread so we can stop it across forks.
 _prometheus_server_thread = None
+# The PrometheusMetricReader built in this process (or inherited from the
+# parent across fork).
+_prometheus_reader = None
 
 
 class _NoopCounter:
@@ -475,7 +478,7 @@ def _build_readers(opts):
     if name == "prometheus":
         try:
             from opentelemetry.exporter.prometheus import PrometheusMetricReader
-            from prometheus_client import start_http_server
+            from prometheus_client import REGISTRY, CollectorRegistry, start_http_server
         except ImportError:
             log.error(
                 "opentelemetry-exporter-prometheus is not installed; "
@@ -491,18 +494,40 @@ def _build_readers(opts):
             port_range = 64
         index = int(_own_instance(opts).get("index") or 0)
         global _prometheus_server_thread  # pylint: disable=global-statement
+        global _prometheus_reader  # pylint: disable=global-statement
+        # A fork child inherits the parent's reader, which is still
+        # registered in prometheus_client's global REGISTRY.  Left alone it
+        # would be served from the child's port too, as a stale frozen copy
+        # of the parent's series.  Give each process its own registry; on
+        # exporter versions without the ``registry`` argument, unregister
+        # the inherited collector instead.
+        registry = CollectorRegistry()
+        try:
+            reader = PrometheusMetricReader(registry=registry)
+        except TypeError:
+            registry = REGISTRY
+            stale = getattr(_prometheus_reader, "_collector", None)
+            if stale is not None:
+                try:
+                    REGISTRY.unregister(stale)
+                except Exception:  # pylint: disable=broad-except
+                    log.debug("could not unregister stale collector", exc_info=True)
+            reader = PrometheusMetricReader()
+        _prometheus_reader = reader
         last_exc = None
         for port in _prometheus_candidate_ports(base_port, port_range, index):
             try:
                 # ``start_http_server`` raises ``OSError`` when the port is
                 # taken.  We track the thread we started so a fork child can
                 # re-bind.
-                _prometheus_server_thread = start_http_server(port=port, addr=host)
+                _prometheus_server_thread = start_http_server(
+                    port=port, addr=host, registry=registry
+                )
             except OSError as exc:
                 last_exc = exc
                 continue
             log.info("Prometheus /metrics listener bound on %s:%d", host, port)
-            return [PrometheusMetricReader()]
+            return [reader]
         log.error(
             "Failed to bind Prometheus listener on %s in port range %d-%d: %s",
             host,

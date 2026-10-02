@@ -1066,7 +1066,15 @@ class Master(SMaster):
         # registered exactly once, in the parent — registering them in
         # MWorker children would over-count.  Workers call configure
         # again in ``MWorker.run`` but skip the observables.
-        salt.utils.metrics.configure({**self.opts, "__role": "master"})
+        # The parent is instance 0 so it keeps the configured Prometheus
+        # port; MWorkers take index 1..N (see ``MWorker.metrics_index``).
+        salt.utils.metrics.configure(
+            {
+                **self.opts,
+                "__role": "master",
+                "__metrics_instance": {"id": "master-main", "index": 0},
+            }
+        )
         # Cross-process counter for "MWorker payloads in flight".  Created
         # here so all forked workers inherit the same shared memory.  Stashed
         # at module level so ``MWorker._handle_payload`` can read it without
@@ -1819,9 +1827,11 @@ class RequestServer(salt.utils.process.SignalHandlingProcess):
         with salt.utils.process.default_signals(signal.SIGINT, signal.SIGTERM):
             if worker_pools:
                 # Multi-pool mode: Create workers for each pool
+                metrics_index = 0
                 for pool_name, pool_config in worker_pools.items():
                     worker_count = pool_config.get("worker_count", 1)
                     for pool_index in range(worker_count):
+                        metrics_index += 1
                         name = f"MWorker-{pool_name}-{pool_index}"
                         self.process_manager.add_process(
                             MWorker,
@@ -1831,7 +1841,11 @@ class RequestServer(salt.utils.process.SignalHandlingProcess):
                                 self.key,
                                 req_channels,
                             ),
-                            kwargs={"pool_name": pool_name, "pool_index": pool_index},
+                            kwargs={
+                                "pool_name": pool_name,
+                                "pool_index": pool_index,
+                                "metrics_index": metrics_index,
+                            },
                             name=name,
                         )
             else:
@@ -1841,6 +1855,7 @@ class RequestServer(salt.utils.process.SignalHandlingProcess):
                     self.process_manager.add_process(
                         MWorker,
                         args=(self.opts, self.master_key, self.key, req_channels),
+                        kwargs={"metrics_index": ind + 1},
                         name=name,
                     )
 
@@ -1872,7 +1887,15 @@ class MWorker(salt.utils.process.SignalHandlingProcess):
     """
 
     def __init__(
-        self, opts, mkey, key, req_channels, pool_name=None, pool_index=None, **kwargs
+        self,
+        opts,
+        mkey,
+        key,
+        req_channels,
+        pool_name=None,
+        pool_index=None,
+        metrics_index=None,
+        **kwargs,
     ):
         """
         Create a salt master worker process
@@ -1882,6 +1905,8 @@ class MWorker(salt.utils.process.SignalHandlingProcess):
         :param dict key: The user running the salt master and the AES key
         :param str pool_name: Name of the worker pool this worker belongs to
         :param int pool_index: Index of this worker within its pool
+        :param int metrics_index: Master-wide ordinal of this worker (1..N),
+            used to give it a stable metrics instance id and Prometheus port
 
         :rtype: MWorker
         :return: Master worker
@@ -1899,6 +1924,7 @@ class MWorker(salt.utils.process.SignalHandlingProcess):
         # Pool-specific attributes
         self.pool_name = pool_name or "default"
         self.pool_index = pool_index if pool_index is not None else 0
+        self.metrics_index = metrics_index
 
     # We need __setstate__ and __getstate__ to also pickle 'SMaster.secrets'.
     # Otherwise, 'SMaster.secrets' won't be copied over to the spawned process
@@ -2224,7 +2250,13 @@ class MWorker(salt.utils.process.SignalHandlingProcess):
         Start a Master Worker
         """
         salt.utils.tracing.configure(self.opts)
-        salt.utils.metrics.configure({**self.opts, "__role": "master"})
+        metrics_opts = {**self.opts, "__role": "master"}
+        if self.metrics_index is not None:
+            metrics_opts["__metrics_instance"] = {
+                "id": f"mworker-{self.pool_name}-{self.pool_index}",
+                "index": self.metrics_index,
+            }
+        salt.utils.metrics.configure(metrics_opts)
         # if we inherit req_server level without our own, reset it
         if not salt.utils.platform.is_windows():
             enforce_mworker_niceness = True

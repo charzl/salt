@@ -2,6 +2,8 @@
 Unit tests for salt.utils.metrics — the OpenTelemetry metrics wrapper.
 """
 
+import multiprocessing
+import os
 import socket
 import subprocess
 import sys
@@ -399,3 +401,178 @@ def test_enabling_metrics_loads_opentelemetry_lazily():
         f"stdout={result.stdout}\nstderr={result.stderr}"
     )
     assert "OK" in result.stdout
+
+
+def _free_port_block(n):
+    """Return a base port with ``n`` consecutive free local ports."""
+    for _ in range(50):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            base = sock.getsockname()[1]
+        if base + n >= 65535:
+            continue
+        socks = []
+        try:
+            for i in range(n):
+                s = socket.socket()
+                s.bind(("127.0.0.1", base + i))
+                socks.append(s)
+        except OSError:
+            continue
+        finally:
+            for s in socks:
+                s.close()
+        return base
+    pytest.skip("could not find a free port block")
+
+
+def _resource_attrs(opts):
+    metrics.configure(opts)
+    resource = metrics._build_resource(metrics._cached_opts)
+    return dict(resource.attributes)
+
+
+def test_resource_has_instance_id_and_pid():
+    metrics.configure({"metrics": {"enabled": True}, "__role": "master"})
+    attrs = dict(metrics._build_resource(metrics._cached_opts).attributes)
+    assert attrs["process.pid"] == os.getpid()
+    assert attrs["service.instance.id"] == f"{socket.gethostname()}-{os.getpid()}"
+
+
+def test_resource_uses_stable_instance_id():
+    attrs = _resource_attrs(
+        {
+            "metrics": {"enabled": True},
+            "__role": "master",
+            "__metrics_instance": {"id": "mworker-default-2", "index": 3},
+        }
+    )
+    assert attrs["service.instance.id"] == "mworker-default-2"
+
+
+def test_resource_attributes_override_instance_id():
+    attrs = _resource_attrs(
+        {
+            "metrics": {
+                "enabled": True,
+                "resource_attributes": {"service.instance.id": "custom"},
+            },
+            "__role": "master",
+            "__metrics_instance": {"id": "mworker-default-2", "index": 3},
+        }
+    )
+    assert attrs["service.instance.id"] == "custom"
+
+
+def test_inherited_instance_not_reused_after_fork(monkeypatch):
+    metrics.configure(
+        {
+            "metrics": {"enabled": True},
+            "__metrics_instance": {"id": "master-main", "index": 0},
+        }
+    )
+    monkeypatch.setattr(os, "getpid", lambda: 1)
+    attrs = dict(metrics._build_resource(metrics._cached_opts).attributes)
+    assert attrs["service.instance.id"] != "master-main"
+
+
+def test_prometheus_candidate_ports():
+    cands = list(metrics._prometheus_candidate_ports(9000, 4, 2))
+    assert cands == [9002, 9000, 9001, 9003]
+    # index outside the range: plain scan
+    assert list(metrics._prometheus_candidate_ports(9000, 3, 10)) == [9000, 9001, 9002]
+
+
+def test_prometheus_port_offset_by_index():
+    base = _free_port_block(4)
+    metrics.configure(
+        {
+            "metrics": {
+                "enabled": True,
+                "exporter": "prometheus",
+                "prometheus": {"host": "127.0.0.1", "port": base, "port_range": 4},
+            },
+            "__metrics_instance": {"id": "mworker-default-1", "index": 2},
+        }
+    )
+    with socket.socket() as sock:
+        # preferred port base+2 must now be taken
+        with pytest.raises(OSError):
+            sock.bind(("127.0.0.1", base + 2))
+
+
+def test_prometheus_all_ports_busy_warns(caplog):
+    base = _free_port_block(2)
+    socks = []
+    for i in range(2):
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        s.bind(("127.0.0.1", base + i))
+        s.listen(1)
+        socks.append(s)
+    try:
+        metrics.configure(
+            {
+                "metrics": {
+                    "enabled": True,
+                    "exporter": "prometheus",
+                    "prometheus": {"host": "127.0.0.1", "port": base, "port_range": 2},
+                },
+            }
+        )
+    finally:
+        for s in socks:
+            s.close()
+    assert any(
+        "Failed to bind Prometheus listener" in r.message for r in caplog.records
+    )
+    assert any(
+        "instruments will record into the void" in r.message for r in caplog.records
+    )
+
+
+def _child(base, index, queue):
+    try:
+        metrics.configure(
+            {
+                "metrics": {
+                    "enabled": True,
+                    "exporter": "prometheus",
+                    "prometheus": {"host": "127.0.0.1", "port": base, "port_range": 8},
+                },
+                "__metrics_instance": {
+                    "id": f"mworker-default-{index}",
+                    "index": index,
+                },
+            }
+        )
+        attrs = dict(metrics._build_resource(metrics._cached_opts).attributes)
+        # Ask the server thread directly for its port.
+        srv = metrics._prometheus_server_thread
+        server = srv[0] if isinstance(srv, tuple) else srv
+        port = server.server_port
+        queue.put((attrs["service.instance.id"], attrs["process.pid"], port))
+        time.sleep(1)  # keep the listener alive while siblings bind
+    except Exception as exc:  # pylint: disable=broad-except
+        queue.put(("error", repr(exc), None))
+
+
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(), reason="needs fork"
+)
+def test_forked_children_get_distinct_instance_ids_and_ports():
+    ctx = multiprocessing.get_context("fork")
+    base = _free_port_block(8)
+    queue = ctx.Queue()
+    procs = [ctx.Process(target=_child, args=(base, i, queue)) for i in range(1, 4)]
+    for p in procs:
+        p.start()
+    results = [queue.get(timeout=30) for _ in procs]
+    for p in procs:
+        p.join(timeout=10)
+    assert all(r[0] != "error" for r in results), results
+    assert len({r[0] for r in results}) == 3
+    assert len({r[1] for r in results}) == 3
+    ports = {r[2] for r in results}
+    assert len(ports) == 3
+    assert ports == {base + 1, base + 2, base + 3}

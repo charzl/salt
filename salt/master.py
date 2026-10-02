@@ -1283,14 +1283,46 @@ class Master(SMaster):
         would starve the heartbeat task.
         """
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        metrics_task = asyncio.create_task(self._job_metrics_loop())
         try:
             await self.process_manager.run(asynchronous=True)
         finally:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except (asyncio.CancelledError, Exception):  # pylint: disable=broad-except
-                pass
+            for task in (heartbeat_task, metrics_task):
+                task.cancel()
+                results = await asyncio.gather(task, return_exceptions=True)
+                log.debug("Background task finished: %r", results)
+
+    async def _job_metrics_loop(self):
+        """
+        Count ``salt.jobs.published`` / ``salt.jobs.completed`` from the
+        event bus, in the parent process.
+
+        The parent owns the metrics provider (and the Prometheus
+        listener), so counting here gives one series per master no matter
+        how many MWorkers there are.  Subscribes to ``salt/job/`` only.
+        """
+        if not salt.utils.metrics.is_enabled():
+            return
+        try:
+            with salt.utils.event.get_master_event(
+                self.opts,
+                self.opts["sock_dir"],
+                io_loop=asyncio.get_running_loop(),
+                listen=True,
+            ) as event_bus:
+                event_bus.subscribe("salt/job/")
+                event_bus.set_event_handler(self._handle_job_metrics_event)
+                await asyncio.Event().wait()
+        except Exception:  # pylint: disable=broad-except
+            # CancelledError is a BaseException and passes through.
+            log.error("Job metrics event listener failed", exc_info=True)
+
+    async def _handle_job_metrics_event(self, package):
+        try:
+            tag, data = salt.utils.event.SaltEvent.unpack(package)
+            record_job_event_metrics(tag, data)
+        except Exception:  # pylint: disable=broad-except
+            log.debug("Failed to record job metrics", exc_info=True)
 
     async def _heartbeat_loop(self):
         """Touch the liveness sentinel every ``DEFAULT_ALIVE_INTERVAL`` seconds."""
@@ -1308,6 +1340,52 @@ class Master(SMaster):
         self.process_manager._handle_signals(signum, sigframe)
         time.sleep(1)
         sys.exit(0)
+
+
+def record_job_event_metrics(tag, data):
+    """
+    Update ``salt.jobs.published`` / ``salt.jobs.completed`` from a master
+    event-bus event.
+
+    Called only from the master parent process (see
+    ``Master._job_metrics_loop``), so the two counters have a single
+    owner: the process that also holds the Prometheus listener.
+    Counting in the MWorkers gives N disjoint copies of the same series
+    (one per worker), which either never reach the Prometheus listener
+    or overwrite each other under OTLP.  Counting in EventMonitor does
+    not help under the Prometheus exporter, because that child cannot
+    bind the parent's port.
+
+    - ``salt/job/<jid>/new``       -> ``salt.jobs.published{fun}``
+    - ``salt/job/<jid>/ret/<id>``  -> ``salt.jobs.completed{fun,success}``
+
+    Events replicated from a cluster peer carry ``__peer_id``; those are
+    ignored because the originating master counts them itself.
+    """
+    parts = tag.split("/", 4)
+    if len(parts) < 4 or parts[0] != "salt" or parts[1] != "job":
+        return
+    kind = parts[3]
+    if kind not in ("new", "ret") or not isinstance(data, dict):
+        return
+    if data.get("__peer_id"):
+        return
+    if kind == "new":
+        salt.utils.metrics.counter(
+            "salt.jobs.published",
+            description="Jobs published from the master to minions.",
+        ).add(1, attributes={"fun": data.get("fun", "")})
+    elif len(parts) == 5:
+        salt.utils.metrics.counter(
+            "salt.jobs.completed",
+            description="Returns received from minions.",
+        ).add(
+            1,
+            attributes={
+                "fun": data.get("fun", ""),
+                "success": str(bool(data.get("success", True))).lower(),
+            },
+        )
 
 
 class EventMonitor(salt.utils.process.SignalHandlingProcess):
@@ -3053,20 +3131,6 @@ class AESFuncs(TransportMethods):
 
         :param dict load: The minion payload
         """
-        salt.utils.metrics.counter(
-            "salt.jobs.completed",
-            description="Returns received from minions.",
-        ).add(
-            1,
-            attributes={
-                "fun": load.get("fun", "") if isinstance(load, dict) else "",
-                "success": (
-                    str(bool(load.get("success", True))).lower()
-                    if isinstance(load, dict)
-                    else "true"
-                ),
-            },
-        )
         if self.opts["require_minion_sign_messages"] and "sig" not in load:
             log.critical(
                 "_return: Master is requiring minions to sign their "
@@ -3679,20 +3743,6 @@ class AESFuncs(TransportMethods):
 
     def _sync_return(self, load):
         """Sync-shim body of ``_return`` (pre-PR verbatim)."""
-        salt.utils.metrics.counter(
-            "salt.jobs.completed",
-            description="Returns received from minions.",
-        ).add(
-            1,
-            attributes={
-                "fun": load.get("fun", "") if isinstance(load, dict) else "",
-                "success": (
-                    str(bool(load.get("success", True))).lower()
-                    if isinstance(load, dict)
-                    else "true"
-                ),
-            },
-        )
         if self.opts["require_minion_sign_messages"] and "sig" not in load:
             log.critical(
                 "_return: Master is requiring minions to sign their "

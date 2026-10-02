@@ -80,9 +80,9 @@ are the same on both daemons.
     Where the Prometheus pull listener binds.  Defaults to
     localhost-only.  In a multi-process master only the parent binds
     this port; counters incremented inside MWorker children are not
-    visible through the parent's ``/metrics`` (use the OTLP push
-    exporter if you need worker-side counters in a Prometheus
-    deployment with multiple workers).
+    visible through the parent's ``/metrics``.  See
+    :ref:`metrics-process-ownership` for which metrics are recorded in
+    which process.
 
 ``histogram_boundaries``
     Per-instrument explicit bucket boundaries.  The defaults span
@@ -96,7 +96,11 @@ Counters
 ~~~~~~~~
 
 - ``salt.jobs.published{fun}`` — jobs published from master to minions.
+  Counted in the master parent process from the ``salt/job/<jid>/new``
+  event.
 - ``salt.jobs.completed{fun,success}`` — returns received from minions.
+  Counted in the master parent process from the
+  ``salt/job/<jid>/ret/<id>`` event.
 - ``salt.auth.attempts{result}`` — master auth attempts; ``result`` is
   one of ``success``, ``invalid_id``, ``max_minions``, ``rejected``,
   ``error``.
@@ -196,6 +200,42 @@ functioning reader without any caller action.
 Observable gauges are registered exactly once — in the master parent for
 master-side gauges, in the minion process for minion-side gauges — to
 avoid forked-worker over-counting.
+
+.. _metrics-process-ownership:
+
+Which process records what (master)
+-----------------------------------
+
+Each master process keeps its own metrics state, and only the parent can
+bind the Prometheus port.  Metrics are therefore only complete where they
+are recorded in the parent:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Metric
+     - Recorded in
+     - Visible on Prometheus ``/metrics``
+   * - ``salt.jobs.published``, ``salt.jobs.completed``
+     - Master parent, from ``salt/job/`` events on the event bus
+     - Yes
+   * - ``salt.events.fired`` (from the master bus)
+     - Process that fires the event
+     - Only for events fired by the parent
+   * - ``salt.master.requests.handled``, ``salt.master.requests.duration``,
+       ``salt.auth.attempts``
+     - MWorker processes
+     - No.  With OTLP, every worker exports the same series and they
+       overwrite each other, so values are per-worker, not totals.
+   * - ``salt.master.connected_minions.count``,
+       ``salt.master.workers.queue.depth``, ``salt.process.open_fds``
+     - Master parent (observable gauges)
+     - Yes
+
+The job counters are derived from the event bus, so they count what the
+master fires: one ``new`` event per published job and one ``ret`` event per
+minion return.  Events replicated from a cluster peer are ignored, so each
+master counts only its own jobs.
 
 Payload and CPU overhead
 ------------------------

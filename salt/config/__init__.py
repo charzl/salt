@@ -1522,6 +1522,7 @@ DEFAULT_MINION_OPTS = immutabletypes.freeze(
             "insecure": True,
             "headers": {},
             "export_interval_seconds": 60,
+            "worker_flush_interval_seconds": 10,
             "prometheus": {
                 "host": "127.0.0.1",
                 "port": 9464,
@@ -1994,6 +1995,7 @@ DEFAULT_MASTER_OPTS = immutabletypes.freeze(
             "insecure": True,
             "headers": {},
             "export_interval_seconds": 60,
+            "worker_flush_interval_seconds": 10,
             "prometheus": {
                 "host": "127.0.0.1",
                 "port": 9464,

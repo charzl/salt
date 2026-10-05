@@ -84,6 +84,10 @@ are the same on both daemons.
     :ref:`metrics-process-ownership` for which metrics are recorded in
     which process.
 
+``worker_flush_interval_seconds``
+    How often each MWorker sends its aggregated request and auth metrics
+    to the master parent.  Default 10.
+
 ``histogram_boundaries``
     Per-instrument explicit bucket boundaries.  The defaults span
     sub-millisecond to one minute for ``salt.job.duration`` and
@@ -207,35 +211,46 @@ Which process records what (master)
 -----------------------------------
 
 Each master process keeps its own metrics state, and only the parent can
-bind the Prometheus port.  Metrics are therefore only complete where they
-are recorded in the parent:
+bind the Prometheus port.  So that every metric appears exactly once, the
+parent is the only process that writes to the exporter:
 
 .. list-table::
    :header-rows: 1
 
    * - Metric
-     - Recorded in
-     - Visible on Prometheus ``/metrics``
+     - Observed in
+     - Written to the exporter by
    * - ``salt.jobs.published``, ``salt.jobs.completed``
-     - Master parent, from ``salt/job/`` events on the event bus
-     - Yes
-   * - ``salt.events.fired`` (from the master bus)
-     - Process that fires the event
-     - Only for events fired by the parent
+     - Event bus (``salt/job/`` events)
+     - Master parent
    * - ``salt.master.requests.handled``, ``salt.master.requests.duration``,
        ``salt.auth.attempts``
      - MWorker processes
-     - No.  With OTLP, every worker exports the same series and they
-       overwrite each other, so values are per-worker, not totals.
+     - Master parent, from summaries the workers send every
+       ``worker_flush_interval_seconds``
    * - ``salt.master.connected_minions.count``,
        ``salt.master.workers.queue.depth``, ``salt.process.open_fds``
      - Master parent (observable gauges)
-     - Yes
+     - Master parent
+   * - ``salt.events.fired``
+     - Process that fires the event
+     - That process; only events fired by the parent are visible on
+       Prometheus ``/metrics``
 
 The job counters are derived from the event bus, so they count what the
 master fires: one ``new`` event per published job and one ``ret`` event per
 minion return.  Events replicated from a cluster peer are ignored, so each
 master counts only its own jobs.
+
+Worker metrics are aggregated in each MWorker (counters per attribute set,
+histograms as a bounded sample of at most 256 values per attribute set per
+interval) and sent to the parent as a ``salt/metrics/worker/<name>`` event.
+Counts are exact.  When a worker saw more than 256 observations for one
+series in an interval, the histogram sum and bucket placement are
+estimated from the sample.  Values buffered in a worker are lost if the
+worker is killed without a clean shutdown, and the metrics lag by up to
+one flush interval.  Set ``metrics.worker_flush_interval_seconds`` to
+change the interval (default 10).
 
 Payload and CPU overhead
 ------------------------

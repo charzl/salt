@@ -57,7 +57,7 @@ def master():
 
 def _fire(master, tag, data):
     package = salt.utils.event.SaltEvent.pack(tag, data)
-    asyncio.run(master._handle_job_metrics_event(package))
+    asyncio.run(master._handle_metrics_event(package))
 
 
 def test_new_event_counts_published(reader, master):
@@ -138,8 +138,8 @@ def test_metrics_failure_is_swallowed(master, monkeypatch):
     _fire(master, "salt/job/1/new", {"jid": "1", "fun": "test.ping"})
 
 
-def test_job_metrics_loop_skipped_when_disabled(master):
+def test_metrics_event_loop_skipped_when_disabled(master):
     metrics.configure({"metrics": {"enabled": False}, "__role": "master"})
     # Returns immediately without touching the event bus (opts has no sock_dir).
     master.opts = {}
-    asyncio.run(master._job_metrics_loop())
+    asyncio.run(master._metrics_event_loop())

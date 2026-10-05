@@ -4,9 +4,10 @@ Verify the per-command master dispatcher metrics:
 * ``salt.master.requests.handled{cmd}`` counter
 * ``salt.master.requests.duration{cmd}`` histogram
 
-These are recorded by ``MWorker._handle_clear`` and ``MWorker._handle_aes``
+These are observed by ``MWorker._handle_clear`` and ``MWorker._handle_aes``
 and give OTel parity with the legacy ``master_stats`` per-command runs +
-mean surface.
+mean surface.  Workers only buffer; the master parent applies the flushed
+summary to the real instruments (``_flush`` below stands in for that hop).
 """
 
 import asyncio
@@ -21,8 +22,17 @@ import salt.utils.metrics as metrics
 def _reset_metrics(monkeypatch):
     metrics.shutdown()
     monkeypatch.setattr(metrics, "_cached_opts", None)
+    metrics.drain_worker_metrics()
     yield
     metrics.shutdown()
+    metrics.drain_worker_metrics()
+
+
+def _flush():
+    """Worker -> parent hop, in-process."""
+    summary = metrics.drain_worker_metrics()
+    if summary is not None:
+        metrics.apply_worker_summary(summary)
 
 
 @pytest.fixture
@@ -106,6 +116,17 @@ def _by_cmd(reader, name):
     return out
 
 
+def test_worker_does_not_write_to_otel_before_flush(in_memory_reader):
+    metrics.configure(
+        {"metrics": {"enabled": True, "exporter": "console"}, "__role": "master"}
+    )
+    worker = _make_worker()
+    asyncio.run(worker._handle_clear({"cmd": "ping"}))
+    assert _by_cmd(in_memory_reader, "salt.master.requests.handled") == {}
+    _flush()
+    assert _by_cmd(in_memory_reader, "salt.master.requests.handled") == {"ping": [1]}
+
+
 def test_handle_clear_records_request_metrics(in_memory_reader):
     metrics.configure(
         {"metrics": {"enabled": True, "exporter": "console"}, "__role": "master"}
@@ -117,6 +138,7 @@ def test_handle_clear_records_request_metrics(in_memory_reader):
     # Sync path: anything not on async_methods.
     asyncio.run(worker._handle_clear({"cmd": "ping"}))
 
+    _flush()
     counts = _by_cmd(in_memory_reader, "salt.master.requests.handled")
     assert sum(counts.get("publish", [])) == 2
     assert sum(counts.get("ping", [])) == 1
@@ -141,6 +163,7 @@ def test_handle_aes_records_request_metrics(in_memory_reader):
     )
     asyncio.run(worker._handle_aes({"cmd": "_serve_file"}))
 
+    _flush()
     counts = _by_cmd(in_memory_reader, "salt.master.requests.handled")
     assert sum(counts.get("_return", [])) == 2
     assert sum(counts.get("_serve_file", [])) == 1
@@ -156,6 +179,7 @@ def test_metrics_disabled_remains_noop(in_memory_reader):
     asyncio.run(worker._handle_clear({"cmd": "publish", "fun": "test.ping"}))
     asyncio.run(worker._handle_aes({"cmd": "_return", "fun": "test.ping"}))
 
+    assert metrics.drain_worker_metrics() is None
     assert _by_cmd(in_memory_reader, "salt.master.requests.handled") == {}
     assert _by_cmd(in_memory_reader, "salt.master.requests.duration") == {}
 
@@ -179,6 +203,7 @@ def test_handle_clear_records_even_when_handler_raises(in_memory_reader):
     with pytest.raises(RuntimeError):
         asyncio.run(worker._handle_clear({"cmd": "ping"}))
 
+    _flush()
     counts = _by_cmd(in_memory_reader, "salt.master.requests.handled")
     durations = _by_cmd(in_memory_reader, "salt.master.requests.duration")
     assert counts.get("ping") == [1]

@@ -1283,7 +1283,7 @@ class Master(SMaster):
         would starve the heartbeat task.
         """
         heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-        metrics_task = asyncio.create_task(self._job_metrics_loop())
+        metrics_task = asyncio.create_task(self._metrics_event_loop())
         try:
             await self.process_manager.run(asynchronous=True)
         finally:
@@ -1292,14 +1292,19 @@ class Master(SMaster):
                 results = await asyncio.gather(task, return_exceptions=True)
                 log.debug("Background task finished: %r", results)
 
-    async def _job_metrics_loop(self):
+    async def _metrics_event_loop(self):
         """
-        Count ``salt.jobs.published`` / ``salt.jobs.completed`` from the
-        event bus, in the parent process.
+        Record master metrics that are derived from the event bus, in the
+        parent process:
+
+        - ``salt.jobs.published`` / ``salt.jobs.completed`` from
+          ``salt/job/`` events;
+        - the periodic summaries MWorkers send under
+          ``salt/metrics/worker/`` (requests, auth attempts).
 
         The parent owns the metrics provider (and the Prometheus
-        listener), so counting here gives one series per master no matter
-        how many MWorkers there are.  Subscribes to ``salt/job/`` only.
+        listener), so recording here gives one series per master no matter
+        how many MWorkers there are.
         """
         if not salt.utils.metrics.is_enabled():
             return
@@ -1311,18 +1316,28 @@ class Master(SMaster):
                 listen=True,
             ) as event_bus:
                 event_bus.subscribe("salt/job/")
-                event_bus.set_event_handler(self._handle_job_metrics_event)
+                event_bus.subscribe(salt.utils.metrics.WORKER_SUMMARY_TAG)
+                event_bus.set_event_handler(self._handle_metrics_event)
                 await asyncio.Event().wait()
         except Exception:  # pylint: disable=broad-except
             # CancelledError is a BaseException and passes through.
-            log.error("Job metrics event listener failed", exc_info=True)
+            log.error("Metrics event listener failed", exc_info=True)
 
-    async def _handle_job_metrics_event(self, package):
+    async def _handle_metrics_event(self, package):
+        # The handler sees every event on the bus; cheaply skip the ones
+        # we do not care about before unpacking.
+        if isinstance(package, bytes) and not package.startswith(
+            _METRICS_EVENT_PREFIXES
+        ):
+            return
         try:
             tag, data = salt.utils.event.SaltEvent.unpack(package)
-            record_job_event_metrics(tag, data)
+            if tag.startswith(salt.utils.metrics.WORKER_SUMMARY_TAG + "/"):
+                salt.utils.metrics.apply_worker_summary(data)
+            else:
+                record_job_event_metrics(tag, data)
         except Exception:  # pylint: disable=broad-except
-            log.debug("Failed to record job metrics", exc_info=True)
+            log.debug("Failed to record event metrics", exc_info=True)
 
     async def _heartbeat_loop(self):
         """Touch the liveness sentinel every ``DEFAULT_ALIVE_INTERVAL`` seconds."""
@@ -1342,13 +1357,19 @@ class Master(SMaster):
         sys.exit(0)
 
 
+_METRICS_EVENT_PREFIXES = (
+    b"salt/job/",
+    salt.utils.metrics.WORKER_SUMMARY_TAG.encode() + b"/",
+)
+
+
 def record_job_event_metrics(tag, data):
     """
     Update ``salt.jobs.published`` / ``salt.jobs.completed`` from a master
     event-bus event.
 
     Called only from the master parent process (see
-    ``Master._job_metrics_loop``), so the two counters have a single
+    ``Master._metrics_event_loop``), so the two counters have a single
     owner: the process that also holds the Prometheus listener.
     Counting in the MWorkers gives N disjoint copies of the same series
     (one per worker), which either never reach the Prometheus listener
@@ -1993,7 +2014,46 @@ class MWorker(salt.utils.process.SignalHandlingProcess):
         state.update({"k_mtime": self.k_mtime, "secrets": SMaster.secrets})
         return state
 
+    def _flush_worker_metrics(self, timeout=1000):
+        """
+        Send the buffered metrics summary to the master parent (blocking).
+        Best effort: the summary is dropped if the event bus is unreachable.
+        """
+        summary = salt.utils.metrics.drain_worker_metrics()
+        if summary is None:
+            return
+        try:
+            if getattr(self, "_metrics_event", None) is None:
+                self._metrics_event = salt.utils.event.get_master_event(
+                    self.opts, self.opts["sock_dir"], listen=False
+                )
+            self._metrics_event.fire_event(
+                summary,
+                f"{salt.utils.metrics.WORKER_SUMMARY_TAG}/{self.name}",
+                timeout=timeout,
+            )
+        except Exception:  # pylint: disable=broad-except
+            log.debug("Failed to flush worker metrics", exc_info=True)
+
+    async def _metrics_flush_loop(self):
+        """
+        Periodically ship the locally aggregated metrics to the master
+        parent, which owns the exporter.
+        """
+        interval = float(
+            (self.opts.get("metrics") or {}).get("worker_flush_interval_seconds")
+            or salt.utils.metrics.DEFAULT_WORKER_FLUSH_INTERVAL
+        )
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(interval)
+            # fire_event can block (up to its timeout) if the publisher is
+            # busy, so keep it off the request loop.
+            await loop.run_in_executor(None, self._flush_worker_metrics)
+
     def _handle_signals(self, signum, sigframe):
+        if salt.utils.metrics.is_enabled():
+            self._flush_worker_metrics(timeout=500)
         for channel in getattr(self, "req_channels", ()):
             try:
                 channel.close()
@@ -2075,6 +2135,10 @@ class MWorker(salt.utils.process.SignalHandlingProcess):
         async def _start():
             self._async_modules_ready = asyncio.Event()
             loader_thread.start()
+            if salt.utils.metrics.is_enabled():
+                self._metrics_flush_task = asyncio.create_task(
+                    self._metrics_flush_loop()
+                )
 
         self.io_loop.run_until_complete(_start())
 
@@ -2226,10 +2290,12 @@ class MWorker(salt.utils.process.SignalHandlingProcess):
         # command, regardless of whether master_stats is enabled.  ``cmd``
         # is a bounded set (the methods exposed by ``ClearFuncs``).
         _metric_start = time.perf_counter()
-        salt.utils.metrics.counter(
+        salt.utils.metrics.worker_counter_add(
             "salt.master.requests.handled",
+            1,
+            {"cmd": cmd},
             description="Requests handled by the master worker dispatcher.",
-        ).add(1, attributes={"cmd": cmd})
+        )
         try:
             if cmd in self.clear_funcs.async_methods:
                 reply = await method(load)
@@ -2237,13 +2303,12 @@ class MWorker(salt.utils.process.SignalHandlingProcess):
             else:
                 ret = method(load), {"fun": "send_clear"}
         finally:
-            salt.utils.metrics.histogram(
+            salt.utils.metrics.worker_histogram_record(
                 "salt.master.requests.duration",
+                (time.perf_counter() - _metric_start) * 1000.0,
+                {"cmd": cmd},
                 description="Per-command dispatcher latency on the master worker.",
                 unit="ms",
-            ).record(
-                (time.perf_counter() - _metric_start) * 1000.0,
-                attributes={"cmd": cmd},
             )
         if self.opts["master_stats"]:
             self._post_stats(start, cmd)
@@ -2270,10 +2335,12 @@ class MWorker(salt.utils.process.SignalHandlingProcess):
             self.stats[cmd]["runs"] += 1
         # OTel parity with master_stats — see ``_handle_clear`` above.
         _metric_start = time.perf_counter()
-        salt.utils.metrics.counter(
+        salt.utils.metrics.worker_counter_add(
             "salt.master.requests.handled",
+            1,
+            {"cmd": cmd},
             description="Requests handled by the master worker dispatcher.",
-        ).add(1, attributes={"cmd": cmd})
+        )
         try:
             with salt.utils.ctx.request_context({"data": data, "opts": self.opts}):
                 # ``run_func`` returns either a (ret, opts) tuple for sync
@@ -2285,13 +2352,12 @@ class MWorker(salt.utils.process.SignalHandlingProcess):
                 if asyncio.iscoroutine(ret):
                     ret = await ret
         finally:
-            salt.utils.metrics.histogram(
+            salt.utils.metrics.worker_histogram_record(
                 "salt.master.requests.duration",
+                (time.perf_counter() - _metric_start) * 1000.0,
+                {"cmd": cmd},
                 description="Per-command dispatcher latency on the master worker.",
                 unit="ms",
-            ).record(
-                (time.perf_counter() - _metric_start) * 1000.0,
-                attributes={"cmd": cmd},
             )
         if self.opts["master_stats"]:
             self._post_stats(start, cmd)
@@ -4070,10 +4136,12 @@ class AuthFuncs(TransportMethods):
                 pass
             return ret
         finally:
-            salt.utils.metrics.counter(
+            salt.utils.metrics.worker_counter_add(
                 "salt.auth.attempts",
+                1,
+                {"result": result},
                 description="Minion authentication attempts.",
-            ).add(1, attributes={"result": result})
+            )
 
     async def _auth_impl(self, load, sign_messages=False, version=0):
         """

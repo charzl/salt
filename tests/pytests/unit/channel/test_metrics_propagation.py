@@ -1,6 +1,8 @@
 """
-Verify the counter co-located with ``PubServerChannel.publish`` increments
-once per publish call with the ``fun`` label.
+Verify ``PubServerChannel.publish`` does not count ``salt.jobs.published``.
+
+The counter is owned by ``EventMonitor`` (see
+tests/pytests/unit/test_event_monitor_job_metrics.py).
 """
 
 import asyncio
@@ -63,18 +65,17 @@ def _published_counts(reader):
     return counts
 
 
-def test_publish_increments_jobs_published(in_memory_reader):
+def test_publish_does_not_count_jobs_published(in_memory_reader):
+    # publish() runs in several processes (and again for cluster peers),
+    # so it must not touch the counter.
     metrics.configure(
         {"metrics": {"enabled": True, "exporter": "console"}, "__role": "master"}
     )
     channel = _make_channel()
     asyncio.run(channel.publish({"jid": "1", "fun": "test.ping", "tgt": "*"}))
-    asyncio.run(channel.publish({"jid": "2", "fun": "test.ping", "tgt": "*"}))
-    asyncio.run(channel.publish({"jid": "3", "fun": "test.echo", "tgt": "*"}))
-
-    counts = _published_counts(in_memory_reader)
-    assert counts.get("test.ping") == 2
-    assert counts.get("test.echo") == 1
+    asyncio.run(channel.publish({"jid": "2", "fun": "test.echo", "tgt": "*"}))
+    assert len(channel.transport.payloads) == 2
+    assert _published_counts(in_memory_reader) == {}
 
 
 def test_publish_is_noop_when_metrics_disabled(in_memory_reader):

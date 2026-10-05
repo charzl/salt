@@ -52,9 +52,16 @@ jobs:
             ${{ runner.os }}-buildx-
 
       - name: Build and Start Environment
+        env:
+          ENABLE_METRICS: ${{ github.event.inputs.enable_metrics || 'false' }}
         run: |
           cd tests/monitoring
           docker compose build
+          # SALT_METRICS selects metrics.on.conf / metrics.off.conf, which
+          # docker-compose mounts into the master's master.d.
+          if [ "$ENABLE_METRICS" = "true" ]; then
+            export SALT_METRICS=on
+          fi
           docker compose up -d
           sleep 30 # Wait for initialization
 
@@ -76,14 +83,7 @@ jobs:
           need_restart=0
 
           if [ "$ENABLE_METRICS" = "true" ]; then
-            echo "Enabling OpenTelemetry metrics on salt-master"
-            # Append the metrics block only if not already present so
-            # re-runs are idempotent.  ``printf`` (not a heredoc) keeps
-            # the YAML block-scalar indentation intact.
-            if ! grep -q '^metrics:' master.conf; then
-              printf '\nmetrics:\n  enabled: true\n' >> master.conf
-              need_restart=1
-            fi
+            echo "OpenTelemetry metrics enabled via metrics.on.conf (SALT_METRICS=on)"
           else
             echo "Leaving metrics.enabled at default (false); OTel package is"
             echo "shipped but never imported by the lazy loader."
@@ -114,6 +114,13 @@ jobs:
       - name: Verify Connections
         run: |
           docker exec salt-master salt '*' test.ping
+
+      - name: Check OTel metrics totals
+        # Needs an idle master, so it runs before the stress test starts.
+        if: ${{ github.event.inputs.enable_metrics == 'true' }}
+        run: |
+          cd tests/monitoring
+          python3 check_otel_metrics.py -n 20
 
       - name: Run Aggressive Stress Test
         run: |

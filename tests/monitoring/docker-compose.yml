@@ -9,6 +9,8 @@ services:
     volumes:
       - ../../salt:/app/salt
       - ./master.conf:/etc/salt/master
+      # SALT_METRICS=on switches the OpenTelemetry metrics on (default: off)
+      - ./metrics.${SALT_METRICS:-off}.conf:/etc/salt/master.d/metrics.conf
       - ./minion.conf:/etc/salt/minion
       - ./srv/salt:/srv/salt
       - /etc/localtime:/etc/localtime:ro

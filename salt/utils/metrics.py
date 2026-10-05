@@ -27,6 +27,7 @@ Configuration lives in ``opts['metrics']``::
       insecure: true                  # gRPC TLS (ignored for non-grpc)
       headers: {}                     # OTLP auth headers
       export_interval_seconds: 60
+      worker_flush_interval_seconds: 10  # MWorker -> master parent summaries
       prometheus:
         host: 127.0.0.1               # localhost-bind by default
         port: 9464
@@ -48,6 +49,7 @@ span attributes if you need them.
 import atexit
 import logging
 import os
+import random
 import threading
 from types import SimpleNamespace
 
@@ -472,3 +474,135 @@ def _default_service_name(opts):
         minion_id = opts.get("id") or ""
         return f"salt-minion-{minion_id}" if minion_id else "salt-minion"
     return "salt"
+
+
+# ---------------------------------------------------------------------------
+# Worker-side aggregation
+#
+# MWorker processes cannot expose metrics themselves (only the master parent
+# binds the Prometheus port, and under OTLP identical series from N workers
+# overwrite each other).  Instead, workers buffer their observations here and
+# periodically ship a delta summary to the master parent over the event bus,
+# where :func:`apply_worker_summary` replays it into the real instruments.
+# ---------------------------------------------------------------------------
+
+WORKER_SUMMARY_TAG = "salt/metrics/worker"
+DEFAULT_WORKER_FLUSH_INTERVAL = 10.0
+# Max raw histogram samples kept per (metric, attributes) between flushes.
+HISTOGRAM_SAMPLE_CAP = 256
+
+# Only these metrics (and attribute keys) are accepted by the parent; the
+# event bus is writable by minions, so never trust the summary blindly.
+_WORKER_METRICS = {
+    "salt.master.requests.handled": {"cmd"},
+    "salt.master.requests.duration": {"cmd"},
+    "salt.auth.attempts": {"result"},
+}
+
+_agg_lock = threading.Lock()
+_agg_counters = {}  # (name, attrs_tuple) -> [description, delta]
+_agg_histograms = {}  # (name, attrs_tuple) -> [description, unit, count, values]
+
+
+def worker_counter_add(name, amount, attributes, *, description=""):
+    """
+    Buffer a counter increment in this (worker) process.  No-op when
+    metrics are disabled.
+    """
+    if not is_enabled():
+        return
+    key = (name, tuple(sorted(attributes.items())))
+    with _agg_lock:
+        entry = _agg_counters.get(key)
+        if entry is None:
+            _agg_counters[key] = [description, amount]
+        else:
+            entry[1] += amount
+
+
+def worker_histogram_record(name, value, attributes, *, description="", unit="ms"):
+    """
+    Buffer a histogram observation in this (worker) process.  Raw values
+    are kept in a bounded buffer (reservoir sampling beyond
+    :data:`HISTOGRAM_SAMPLE_CAP`); the exact observation count is kept
+    separately.  No-op when metrics are disabled.
+    """
+    if not is_enabled():
+        return
+    key = (name, tuple(sorted(attributes.items())))
+    with _agg_lock:
+        entry = _agg_histograms.get(key)
+        if entry is None:
+            _agg_histograms[key] = [description, unit, 1, [value]]
+            return
+        entry[2] += 1
+        values = entry[3]
+        if len(values) < HISTOGRAM_SAMPLE_CAP:
+            values.append(value)
+        else:
+            # Algorithm R: each of the entry[2] observations is retained
+            # with probability CAP / count.
+            idx = random.randrange(entry[2])  # nosec - not security related
+            if idx < HISTOGRAM_SAMPLE_CAP:
+                values[idx] = value
+
+
+def drain_worker_metrics():
+    """
+    Return and reset the buffered summary, or ``None`` if nothing is
+    buffered.  The result is plain msgpack-able data.
+    """
+    with _agg_lock:
+        if not _agg_counters and not _agg_histograms:
+            return None
+        counters = [
+            [name, desc, dict(attrs), delta]
+            for (name, attrs), (desc, delta) in _agg_counters.items()
+        ]
+        histograms = [
+            [name, desc, unit, dict(attrs), count, values]
+            for (name, attrs), (desc, unit, count, values) in _agg_histograms.items()
+        ]
+        _agg_counters.clear()
+        _agg_histograms.clear()
+    return {"counters": counters, "histograms": histograms}
+
+
+def apply_worker_summary(summary):
+    """
+    Replay a summary produced by :func:`drain_worker_metrics` into the real
+    instruments of this (parent) process.
+
+    Histogram samples are weighted so the recorded observation count equals
+    the exact count the worker saw; the sum is an estimate when the worker
+    had to sample.
+    """
+    if not isinstance(summary, dict) or not is_enabled():
+        return
+    for item in summary.get("counters") or ():
+        try:
+            name, desc, attrs, delta = item
+            if name not in _WORKER_METRICS or set(attrs) - _WORKER_METRICS[name]:
+                continue
+            if not isinstance(delta, (int, float)) or delta <= 0:
+                continue
+            counter(name, description=str(desc)).add(
+                delta, attributes={k: str(v) for k, v in attrs.items()}
+            )
+        except (TypeError, ValueError, AttributeError):
+            log.debug("Ignoring malformed worker counter %r", item)
+    for item in summary.get("histograms") or ():
+        try:
+            name, desc, unit, attrs, count, values = item
+            if name not in _WORKER_METRICS or set(attrs) - _WORKER_METRICS[name]:
+                continue
+            if not values or not isinstance(count, int) or count < len(values):
+                continue
+            hist = histogram(name, description=str(desc), unit=str(unit))
+            attrs = {k: str(v) for k, v in attrs.items()}
+            weight, extra = divmod(count, len(values))
+            for i, value in enumerate(values):
+                for _ in range(weight + (1 if i < extra else 0)):
+                    hist.record(float(value), attributes=attrs)
+        except (TypeError, ValueError, AttributeError):
+            log.debug("Ignoring malformed worker histogram %r", item)

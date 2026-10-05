@@ -13,3 +13,8 @@ scrape_configs:
   - job_name: 'salt-fds'
     static_configs:
       - targets: ['salt-master:8002']
+
+  # OpenTelemetry metrics (only present when the master runs with SALT_METRICS=on)
+  - job_name: 'salt-otel'
+    static_configs:
+      - targets: ['salt-master:9464']

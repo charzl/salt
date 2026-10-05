@@ -54,3 +54,31 @@ container_memory_rss{container_label_com_docker_compose_service="salt-master"}
 - `minion.conf`: Salt Minion configuration (shared by both minions)
 - `prometheus.yml`: Prometheus configuration
 - `Dockerfile.salt`: Dockerfile for Salt components
+
+## OpenTelemetry metrics
+
+The master can expose its OpenTelemetry metrics (`salt_jobs_*`,
+`salt_master_requests_*`, `salt_auth_attempts_total`) on port 9464.  They are
+off by default, so `master.conf` has no `metrics:` block.  `SALT_METRICS`
+picks an overlay that is mounted as `/etc/salt/master.d/metrics.conf`:
+
+```bash
+SALT_METRICS=on docker-compose up -d     # metrics.on.conf (prometheus exporter)
+docker-compose up -d                     # metrics.off.conf (no metrics)
+```
+
+Prometheus scrapes `salt-master:9464` (job `salt-otel`), and Grafana has a
+"Salt OTel Metrics" dashboard.  To compare memory with metrics on and off,
+run the stress test once with each setting.
+
+To check that the numbers add up, stop `stress_test.sh` (the master must be
+otherwise idle) and run:
+
+```bash
+python3 check_otel_metrics.py -n 20
+```
+
+It sends N `test.ping` jobs to `salt-minion-1`, waits for the worker flush
+(`worker_flush_interval_seconds`, default 10) and exits non-zero unless
+published, completed and the `publish`/`_return` request counters and
+duration counts all grew by exactly N.

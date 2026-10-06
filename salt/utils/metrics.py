@@ -30,7 +30,6 @@ Configuration lives in ``opts['metrics']``::
       prometheus:
         host: 127.0.0.1               # localhost-bind by default
         port: 9464
-        port_range: 64                # ports tried: port .. port+port_range-1
       histogram_boundaries:
         salt.job.duration: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000]
         salt.minion.exec.duration: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
@@ -41,13 +40,12 @@ base requirements.  The ``otlp-grpc`` exporter is opt-in: install
 
 **Multi-process semantics**: every salt process that records metrics
 (the master parent and each MWorker) is its own OpenTelemetry producer.
-Each one carries a distinct ``service.instance.id`` and ``process.pid``
-resource attribute so cumulative series from different processes do not
-overwrite each other.  With the ``prometheus`` exporter each process binds
-its own port: ``prometheus.port + index`` (master parent is index 0,
-MWorkers are 1..N), falling back to the next free port inside
-``port .. port + port_range - 1``.  Aggregate across processes with
-``sum by (...)``.
+Each one carries a distinct ``service.instance.id`` resource attribute
+(``<hostname>/<process name>``, e.g. ``salt-master-01/MWorker-2``) so
+cumulative series from different processes do not overwrite each other.
+Aggregate across processes with ``sum by (...)``.  The ``prometheus``
+exporter listens on a single port, so only the process that binds it
+(the master parent) is scraped.
 
 **Cardinality**: every instrument's labels must come from a bounded
 domain.  Acceptable: ``fun`` (bounded by the salt module space),
@@ -141,9 +139,6 @@ _cached_opts = None
 _atexit_registered = False
 # Track the Prometheus HTTP server thread so we can stop it across forks.
 _prometheus_server_thread = None
-# The PrometheusMetricReader built in this process (or inherited from the
-# parent across fork).
-_prometheus_reader = None
 
 
 class _NoopCounter:
@@ -360,27 +355,33 @@ def _own_instance(opts):
 
 def _instance_id(opts):
     """
-    Return a stable per-process identity, e.g. ``mworker-default-2``.
+    Return a stable per-process identity, ``<hostname>/<process name>``,
+    e.g. ``salt-master-01/MWorker-2``.
 
-    Falls back to ``<hostname>-<pid>`` when the caller did not supply one.
+    The name is stable across restarts, so a restarted worker continues its
+    own series instead of starting a new one.  The hostname keeps processes
+    with the same name on different masters apart.  Falls back to
+    ``<hostname>/<pid>`` when the caller did not supply a name.
     """
-    instance = _own_instance(opts)
-    ident = instance.get("id")
+    host = socket.gethostname()
+    ident = _own_instance(opts).get("id")
     if ident:
-        return str(ident)
-    return f"{socket.gethostname()}-{os.getpid()}"
+        return f"{host}/{ident}"
+    return f"{host}/{os.getpid()}"
 
 
 def _build_resource(opts):
-    attrs = {
-        "service.name": opts.get("service_name") or "salt",
-        "service.instance.id": _instance_id(opts),
-        "process.pid": os.getpid(),
-    }
+    attrs = {"service.name": opts.get("service_name") or "salt"}
     extra = opts.get("resource_attributes") or {}
     if isinstance(extra, dict):
         attrs.update(extra)
-    return _otel.Resource.create(attrs)
+    instance_id = attrs.pop("service.instance.id", None) or _instance_id(opts)
+    # ``Resource.create`` may fill ``service.instance.id`` itself (SDK >= 1.43)
+    # and some releases overrode a value passed in.  ``merge`` lets the right
+    # side win on every SDK version.
+    return _otel.Resource.create(attrs).merge(
+        _otel.Resource({"service.instance.id": instance_id})
+    )
 
 
 def _build_views(opts):
@@ -478,7 +479,7 @@ def _build_readers(opts):
     if name == "prometheus":
         try:
             from opentelemetry.exporter.prometheus import PrometheusMetricReader
-            from prometheus_client import REGISTRY, CollectorRegistry, start_http_server
+            from prometheus_client import start_http_server
         except ImportError:
             log.error(
                 "opentelemetry-exporter-prometheus is not installed; "
@@ -487,71 +488,26 @@ def _build_readers(opts):
             return []
         prometheus_opts = opts.get("prometheus") or {}
         host = prometheus_opts.get("host", "127.0.0.1")
-        base_port = int(prometheus_opts.get("port", 9464))
-        try:
-            port_range = max(1, int(prometheus_opts.get("port_range", 64)))
-        except (TypeError, ValueError):
-            port_range = 64
-        index = int(_own_instance(opts).get("index") or 0)
+        port = int(prometheus_opts.get("port", 9464))
         global _prometheus_server_thread  # pylint: disable=global-statement
-        global _prometheus_reader  # pylint: disable=global-statement
-        # A fork child inherits the parent's reader, which is still
-        # registered in prometheus_client's global REGISTRY.  Left alone it
-        # would be served from the child's port too, as a stale frozen copy
-        # of the parent's series.  Give each process its own registry; on
-        # exporter versions without the ``registry`` argument, unregister
-        # the inherited collector instead.
-        registry = CollectorRegistry()
         try:
-            reader = PrometheusMetricReader(registry=registry)
-        except TypeError:
-            registry = REGISTRY
-            stale = getattr(_prometheus_reader, "_collector", None)
-            if stale is not None:
-                try:
-                    REGISTRY.unregister(stale)
-                except Exception:  # pylint: disable=broad-except
-                    log.debug("could not unregister stale collector", exc_info=True)
-            reader = PrometheusMetricReader()
-        _prometheus_reader = reader
-        last_exc = None
-        for port in _prometheus_candidate_ports(base_port, port_range, index):
-            try:
-                # ``start_http_server`` raises ``OSError`` when the port is
-                # taken.  We track the thread we started so a fork child can
-                # re-bind.
-                _prometheus_server_thread = start_http_server(
-                    port=port, addr=host, registry=registry
-                )
-            except OSError as exc:
-                last_exc = exc
-                continue
-            log.info("Prometheus /metrics listener bound on %s:%d", host, port)
-            return [reader]
-        log.error(
-            "Failed to bind Prometheus listener on %s in port range %d-%d: %s",
-            host,
-            base_port,
-            base_port + port_range - 1,
-            last_exc,
-        )
-        return []
+            # ``start_http_server`` is idempotent in the sense that calling
+            # it twice in the same process raises ``OSError`` (port in use).
+            # We track the thread we started so a fork child can re-bind.
+            _prometheus_server_thread = start_http_server(port=port, addr=host)
+        except OSError as exc:
+            log.error(
+                "Failed to bind Prometheus listener on %s:%d: %s",
+                host,
+                port,
+                exc,
+            )
+            return []
+        log.info("Prometheus /metrics listener bound on %s:%d", host, port)
+        return [PrometheusMetricReader()]
 
     log.warning("Unknown metrics exporter %r; metrics will be a no-op", name)
     return []
-
-
-def _prometheus_candidate_ports(base_port, port_range, index):
-    """
-    Yield ports to try: the one derived from ``index`` first, then the rest
-    of ``base_port .. base_port + port_range - 1`` in order.
-    """
-    preferred = base_port + index if 0 <= index < port_range else None
-    if preferred is not None:
-        yield preferred
-    for port in range(base_port, base_port + port_range):
-        if port != preferred and port <= 65535:
-            yield port
 
 
 def _default_service_name(opts):

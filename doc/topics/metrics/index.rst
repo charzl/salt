@@ -39,7 +39,6 @@ are the same on both daemons.
       prometheus:
         host: 127.0.0.1               # localhost-bind by default
         port: 9464
-        port_range: 64                # ports tried: port .. port+port_range-1
       histogram_boundaries:
         salt.job.duration: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000]
         salt.minion.exec.duration: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
@@ -77,17 +76,13 @@ are the same on both daemons.
     for the Prometheus pull exporter (Prometheus controls cadence via
     its scrape interval).
 
-``prometheus.host`` / ``prometheus.port`` / ``prometheus.port_range``
+``prometheus.host`` / ``prometheus.port``
     Where the Prometheus pull listener binds.  Defaults to
-    localhost-only.  Every salt process that records metrics binds its
-    own listener, because Prometheus scrapes one process per port.  The
-    master parent uses ``port``; MWorker number *N* (counted across all
-    worker pools, starting at 1) prefers ``port + N``.  If that port is
-    taken, the next free port in ``port .. port + port_range - 1`` is
-    used.  ``port_range`` defaults to 64 and must be at least
-    ``worker_threads + 1`` (or the total worker count of all pools plus
-    one) so every process gets a port.  A process that finds no free
-    port logs an error and records nothing.
+    localhost-only.  In a multi-process master only the parent binds
+    this port; counters incremented inside MWorker children are not
+    visible through the parent's ``/metrics`` (use the OTLP push
+    exporter if you need worker-side counters in a Prometheus
+    deployment with multiple workers).
 
 ``histogram_boundaries``
     Per-instrument explicit bucket boundaries.  The defaults span
@@ -193,29 +188,24 @@ Multi-process semantics
 -----------------------
 
 The master parent and each MWorker are separate processes and each one
-exports its own metrics.  To keep their series apart, every process adds
-two resource attributes:
+exports its own metrics.  To keep their series apart, every process sets
+``service.instance.id`` to ``<hostname>/<process name>``, for example
+``salt-master-01/Master`` for the master parent and
+``salt-master-01/MWorker-2`` for a worker.  The process name is the same
+after a worker restarts, so a restarted worker continues its own series.
+The hostname keeps processes on different masters apart.  Processes that are
+not given a name fall back to ``<hostname>/<pid>``.
 
-- ``service.instance.id``: ``master-main`` for the master parent,
-  ``mworker-<pool>-<index>`` for workers (``mworker-default-0`` etc.).
-  Processes that are not given a name fall back to ``<hostname>-<pid>``.
-- ``process.pid``.
+A ``service.instance.id`` set in ``resource_attributes`` takes precedence.
 
-Values in ``resource_attributes`` take precedence over both.
+With OTLP the collector receives one series per instance.  Series are not
+summed for you.  Aggregate in the query, for example
+``sum by (cmd) (rate(salt_master_requests_handled_total[5m]))``, or
+``sum without (service_instance_id, instance, job) (...)`` to get one total.
 
-With OTLP the collector receives one series per instance.  With
-Prometheus, scrape the whole port range, for example::
-
-    scrape_configs:
-      - job_name: salt-master
-        static_configs:
-          - targets: ['127.0.0.1:9464', '127.0.0.1:9465', '127.0.0.1:9466',
-                      '127.0.0.1:9467']   # parent + 3 workers
-
-Per-process series are not summed for you.  Aggregate in the query, for
-example ``sum by (cmd) (rate(salt_master_requests_handled_total[5m]))``, or
-``sum without (service_instance_id, process_pid, instance, job) (...)``.
-Gauges registered by the master parent only appear on the parent's port.
+The ``prometheus`` exporter listens on a single port, so only the process
+that binds it (the master parent) is scraped.  Gauges registered by the
+master parent appear there too.
 
 Fork handling
 -------------

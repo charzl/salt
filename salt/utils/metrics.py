@@ -43,9 +43,7 @@ base requirements.  The ``otlp-grpc`` exporter is opt-in: install
 Each one carries a distinct ``service.instance.id`` resource attribute
 (``<hostname>/<process name>``, e.g. ``salt-master-01/MWorker-2``) so
 cumulative series from different processes do not overwrite each other.
-Aggregate across processes with ``sum by (...)``.  The ``prometheus``
-exporter listens on a single port, so only the process that binds it
-(the master parent) is scraped.
+Aggregate across processes with ``sum by (...)``.
 
 **Cardinality**: every instrument's labels must come from a bounded
 domain.  Acceptable: ``fun`` (bounded by the salt module space),

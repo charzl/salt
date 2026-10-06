@@ -203,10 +203,6 @@ summed for you.  Aggregate in the query, for example
 ``sum by (cmd) (rate(salt_master_requests_handled_total[5m]))``, or
 ``sum without (service_instance_id, instance, job) (...)`` to get one total.
 
-The ``prometheus`` exporter listens on a single port, so only the process
-that binds it (the master parent) is scraped.  Gauges registered by the
-master parent appear there too.
-
 Fork handling
 -------------
 

@@ -2,6 +2,7 @@
 Unit tests for the ``prometheus_client`` backend of salt.utils.metrics.
 """
 
+import logging
 import os
 import socket
 import sys
@@ -26,7 +27,7 @@ def _reset_metrics(monkeypatch):
     metrics.shutdown()
 
 
-def _configure(tmp_path):
+def _configure(tmp_path, **extra):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -40,6 +41,7 @@ def _configure(tmp_path):
                     "port": port,
                     "multiproc_dir": str(tmp_path / "prom"),
                 },
+                **extra,
             },
             "__role": "master",
         }
@@ -186,3 +188,51 @@ def test_scraping_while_threads_write(tmp_path):
     assert totals == sorted(totals)
     final = _series(_scrape(port), "salt_test_scrape_total")
     assert final == {'salt_test_scrape_total{cmd="x"}': float(writers * per_writer)}
+
+
+def test_target_info_carries_the_resource_attributes(tmp_path):
+    port = _configure(
+        tmp_path,
+        service_name="salt-master-x",
+        resource_attributes={"deployment.environment": "prod"},
+    )
+    body = _scrape(port)
+    assert (
+        'target_info{deployment_environment="prod",service_name="salt-master-x"} 1.0'
+        in body
+    )
+
+
+def test_environment_variable_is_overridden_with_a_warning(
+    tmp_path, monkeypatch, caplog
+):
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(foreign))
+    with caplog.at_level(logging.WARNING):
+        port = _configure(tmp_path)
+    metrics.counter("salt.test.env").add(1)
+    assert "salt_test_env_total 1.0" in _scrape(port)
+    assert os.environ["PROMETHEUS_MULTIPROC_DIR"] == str(tmp_path / "prom")
+    assert any("PROMETHEUS_MULTIPROC_DIR" in rec.message for rec in caplog.records)
+    assert not list(foreign.iterdir())
+
+
+def test_bind_failure_is_not_retried(tmp_path, monkeypatch):
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        opts = {
+            "prometheus": {
+                "host": "127.0.0.1",
+                "port": busy.getsockname()[1],
+                "multiproc_dir": str(tmp_path / "prom"),
+            }
+        }
+        assert backend.start(opts) is False
+
+        def retried(*args, **kwargs):
+            raise AssertionError("tried to bind again")
+
+        monkeypatch.setattr(backend._pc.lib, "start_http_server", retried)
+        assert backend.start(opts) is False

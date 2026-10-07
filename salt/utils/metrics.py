@@ -207,10 +207,8 @@ def configure(opts):
             atexit.register(shutdown)
             _atexit_registered = True
         if not salt.utils.metrics_prometheus.start(_cached_opts):
-            log.warning(
-                "metrics.exporter is 'prometheus' but it could not be started; "
-                "metrics remain disabled in this process."
-            )
+            # The cause was logged where it happened (and only once).
+            log.debug("The prometheus metrics backend is not running here.")
         return
     if not _load_otel():
         log.warning(

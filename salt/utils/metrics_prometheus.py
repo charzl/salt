@@ -45,6 +45,9 @@ from typing import Any, TypeVar, cast
 log = logging.getLogger(__name__)
 
 _ENV = "PROMETHEUS_MULTIPROC_DIR"
+# Set by the serving process so that processes that did not fork from it
+# can tell its directory from one the user put in the environment.
+_OWNER_ENV = "SALT_METRICS_PROMETHEUS_OWNER"
 
 # Default bucket boundaries of the OpenTelemetry SDK for millisecond
 # histograms; used when ``metrics.histogram_boundaries`` has no entry.
@@ -83,6 +86,7 @@ _Callback = Callable[[Any], Iterable[Any]]
 _lock = threading.RLock()
 _pc: Any = None  # the imported prometheus_client modules, once loaded
 _load_failed: bool = False
+_start_failed: bool = False
 
 # State of the process that serves /metrics.  ``_dir`` is set (and
 # inherited by forked children) once :func:`start` has run in the parent.
@@ -92,6 +96,7 @@ _owner_pid: int | None = None
 _server: Any = None
 _orig_value_class: Any = None
 _boundaries: dict[str, tuple[float, ...]] = {}
+_target_info: dict[str, str] = {}
 
 _instruments: dict[tuple[str, str], _Instrument] = {}
 _callbacks: dict[str, tuple[_Callback, str, str]] = {}
@@ -111,7 +116,7 @@ def load() -> bool:
             # pylint: disable=import-outside-toplevel
             import prometheus_client
             from prometheus_client import multiprocess, values
-            from prometheus_client.core import GaugeMetricFamily
+            from prometheus_client.core import GaugeMetricFamily, InfoMetricFamily
         except ImportError:
             _load_failed = True
             log.error(
@@ -124,6 +129,7 @@ def load() -> bool:
             multiprocess=multiprocess,
             values=values,
             GaugeMetricFamily=GaugeMetricFamily,
+            InfoMetricFamily=InfoMetricFamily,
         )
         return True
 
@@ -139,15 +145,26 @@ def start(opts: dict[str, Any]) -> bool:
     """
     global _dir, _dir_is_ours, _owner_pid  # pylint: disable=global-statement
     global _server, _boundaries  # pylint: disable=global-statement
+    global _start_failed, _target_info  # pylint: disable=global-statement
     if not load():
         return False
     with _lock:
+        if _start_failed:
+            return False
         _boundaries = _parse_boundaries(opts.get("histogram_boundaries"))
+        _target_info = _build_target_info(opts)
         if _dir is None and os.environ.get(_ENV):
-            # Inherited by a process that did not fork from the owner
-            # (spawn start method): write into the owner's directory.
-            _use_multiprocess_values()
-            return True
+            if os.environ.get(_OWNER_ENV):
+                # Inherited by a process that did not fork from the owner
+                # (spawn start method): write into the owner's directory.
+                _use_multiprocess_values()
+                return True
+            log.warning(
+                "%s is set in the environment (%s); Salt manages its own "
+                "directory and overrides it.",
+                _ENV,
+                os.environ[_ENV],
+            )
         if _dir is not None:
             _use_multiprocess_values()
             return True
@@ -163,6 +180,7 @@ def start(opts: dict[str, Any]) -> bool:
         else:
             _dir, _dir_is_ours = tempfile.mkdtemp(prefix="salt-metrics-"), True
         os.environ[_ENV] = _dir
+        os.environ[_OWNER_ENV] = str(os.getpid())
         _owner_pid = os.getpid()
         _use_multiprocess_values()
 
@@ -177,6 +195,8 @@ def start(opts: dict[str, Any]) -> bool:
             log.error(
                 "Failed to bind Prometheus listener on %s:%d: %s", host, port, exc
             )
+            # Processes forked later must not try again and log the same error.
+            _start_failed = True
             _teardown()
             return False
         log.info("Prometheus /metrics listener bound on %s:%d", host, port)
@@ -185,7 +205,9 @@ def start(opts: dict[str, Any]) -> bool:
 
 def stop() -> None:
     """Stop serving and remove the shared directory (owner process only)."""
+    global _start_failed  # pylint: disable=global-statement
     with _lock:
+        _start_failed = False
         if _owner_pid is not None and _owner_pid == os.getpid():
             if isinstance(_server, tuple):
                 try:
@@ -221,6 +243,7 @@ def _teardown() -> None:
                     except OSError:
                         pass
     os.environ.pop(_ENV, None)
+    os.environ.pop(_OWNER_ENV, None)
     _dir, _dir_is_ours, _owner_pid, _server = None, False, None, None
 
 
@@ -239,6 +262,15 @@ def _use_multiprocess_values() -> None:
     if _orig_value_class is None:
         _orig_value_class = values.ValueClass
     values.ValueClass = values.MultiProcessValue()
+
+
+def _build_target_info(opts: dict[str, Any]) -> dict[str, str]:
+    """Labels of the ``target_info`` metric: the service name and ``resource_attributes``."""
+    attrs: dict[str, Any] = {"service.name": opts.get("service_name") or "salt"}
+    extra = opts.get("resource_attributes")
+    if isinstance(extra, dict):
+        attrs.update(extra)
+    return {_label_name(k): str(v) for k, v in attrs.items()}
 
 
 def _parse_boundaries(boundaries_map: Any) -> dict[str, tuple[float, ...]]:
@@ -373,6 +405,10 @@ class _CallbackCollector:
     """Expose the observable gauges next to the multiprocess metrics."""
 
     def collect(self) -> Iterator[Any]:
+        if _target_info:
+            yield _pc.InfoMetricFamily(
+                "target", "Target metadata", value=dict(_target_info)
+            )
         with _lock:
             callbacks = list(_callbacks.items())
         for name, (callback, description, unit) in callbacks:

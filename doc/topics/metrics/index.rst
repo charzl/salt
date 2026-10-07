@@ -88,8 +88,8 @@ are the same on both daemons.
     Directory where the processes keep their values.  When empty, a
     temporary directory is created at start and removed at stop.  When
     set, ``*.db`` files left in it by a previous run are deleted at
-    start.  Make sure ``PROMETHEUS_MULTIPROC_DIR`` is not set in the
-    master's environment.
+    start.  If ``PROMETHEUS_MULTIPROC_DIR`` is set in the master's
+    environment, Salt logs a warning and uses its own directory instead.
 
 ``histogram_boundaries``
     Per-instrument explicit bucket boundaries.  The defaults span
@@ -213,7 +213,9 @@ if workers are restarted repeatedly it keeps growing until the master is
 restarted.
 
 Metric names do not change (for example ``salt_jobs_completed_total`` and
-``salt_job_duration_milliseconds_*``).
+``salt_job_duration_milliseconds_*``).  The ``service_name`` and
+``resource_attributes`` settings appear on a ``target_info`` metric, as
+before.  The ``otel_scope_*`` labels are no longer added to each series.
 
 Fork handling
 -------------

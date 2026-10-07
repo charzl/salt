@@ -207,6 +207,14 @@ stay in the total until the master stops, so counters never go
 backwards.  Observable gauges are evaluated by the main process at
 scrape time.
 
+Known limitation: a process that exits leaves its files in the
+directory until the master stops.  Each file is small (64 KiB), and
+master workers are normally not replaced, so the directory grows only
+when workers are repeatedly restarted.  The files cannot simply be
+deleted while the master runs: that would make counters drop, which
+Prometheus reads as a reset.  Merging them into one file is possible but
+neither ``prometheus_client`` nor Salt does it today.
+
 Metric names are the same as with the OpenTelemetry exporter
 (``salt_jobs_completed_total``, ``salt_job_duration_milliseconds_*``).
 ``get_meter()`` returns ``None`` with this exporter.

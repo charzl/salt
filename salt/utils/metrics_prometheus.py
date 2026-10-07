@@ -16,6 +16,14 @@ Observable gauges stay callbacks.  They are evaluated at scrape time in
 the serving process, which is where Salt registers them (the master
 parent, or the minion).
 
+Known limitation: the files of exited processes stay in the directory
+until the master stops, because deleting them would make the counters go
+down.  ``prometheus_client`` has no compaction for counters and
+histograms (``mark_process_dead`` only removes live gauges).  If this
+becomes a problem, merge the files of dead pids into one with
+``MultiProcessCollector.merge(files, accumulate=False)``, holding a lock
+against concurrent scrapes and re-checking that the pid is still dead.
+
 The directory belongs to Salt: it is created when the serving process
 starts and removed when it stops, so values from a previous run never
 leak in.  Do not set ``PROMETHEUS_MULTIPROC_DIR`` yourself; use

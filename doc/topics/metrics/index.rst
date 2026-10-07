@@ -57,7 +57,9 @@ are the same on both daemons.
       platform / interpreter combinations).
     - ``prometheus`` — bind a local ``/metrics`` HTTP endpoint that
       Prometheus can scrape.  Operators who already run Prometheus can
-      skip the OTel Collector entirely.
+      skip the OTel Collector entirely.  This exporter uses
+      ``prometheus_client`` directly instead of the OpenTelemetry SDK;
+      see :ref:`metrics-prometheus-multiprocess`.
     - ``console`` — print metrics to stdout for debugging.
 
 ``endpoint``
@@ -78,11 +80,15 @@ are the same on both daemons.
 
 ``prometheus.host`` / ``prometheus.port``
     Where the Prometheus pull listener binds.  Defaults to
-    localhost-only.  In a multi-process master only the parent binds
-    this port; counters incremented inside MWorker children are not
-    visible through the parent's ``/metrics`` (use the OTLP push
-    exporter if you need worker-side counters in a Prometheus
-    deployment with multiple workers).
+    localhost-only.  Only the master (or minion) main process binds
+    the port; the values recorded by its worker processes are added to
+    what it serves.
+
+``prometheus.multiproc_dir``
+    Directory where the processes keep their values.  When empty, a
+    temporary directory is created at start and removed at stop.  When
+    set, ``*.db`` files left in it by a previous run are deleted at
+    start.  Do not set ``PROMETHEUS_MULTIPROC_DIR`` yourself.
 
 ``histogram_boundaries``
     Per-instrument explicit bucket boundaries.  The defaults span
@@ -183,6 +189,27 @@ Prometheus pull::
 
 ``curl -s http://127.0.0.1:9464/metrics | grep '^salt_'`` then shows
 the salt-namespaced metrics.
+
+.. _metrics-prometheus-multiprocess:
+
+Prometheus and multiple processes
+---------------------------------
+
+The master runs many processes (the main process, MWorkers and
+others), and each one counts what it handles.  With
+``exporter: prometheus`` they all write their values into a shared
+directory, and the main process adds them up whenever ``/metrics`` is
+scraped.  Prometheus sees one series per metric and label set, as for a
+single process: there is no per-process label and nothing to ``sum``.
+
+Values of a process that has exited (for example a restarted MWorker)
+stay in the total until the master stops, so counters never go
+backwards.  Observable gauges are evaluated by the main process at
+scrape time.
+
+Metric names are the same as with the OpenTelemetry exporter
+(``salt_jobs_completed_total``, ``salt_job_duration_milliseconds_*``).
+``get_meter()`` returns ``None`` with this exporter.
 
 Fork handling
 -------------

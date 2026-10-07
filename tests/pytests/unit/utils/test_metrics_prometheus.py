@@ -5,6 +5,7 @@ Unit tests for the ``prometheus_client`` backend of salt.utils.metrics.
 import os
 import socket
 import sys
+import threading
 import urllib.request
 
 import pytest
@@ -109,3 +110,79 @@ def test_missing_prometheus_client_is_graceful(tmp_path, monkeypatch):
     assert metrics.is_enabled() is False
     assert metrics.counter("salt.test.none") is metrics._NOOP_COUNTER
     assert "PROMETHEUS_MULTIPROC_DIR" not in os.environ
+
+
+def _series(body, name):
+    """Return ``{labels-part: value}`` for the sample lines of ``name``."""
+    out = {}
+    for line in body.splitlines():
+        if line.startswith(name + "{"):
+            labels, value = line.rsplit(" ", 1)
+            out[labels] = float(value)
+    return out
+
+
+def test_concurrent_threads_lose_no_counts(tmp_path):
+    port = _configure(tmp_path)
+    threads_count, per_thread = 16, 1000
+    barrier = threading.Barrier(threads_count)
+
+    def work(index):
+        # Every thread asks for the instrument and records the very first
+        # measurement at the same moment, to race the lazy creation.
+        counter = metrics.counter("salt.test.threads")
+        barrier.wait()
+        for _ in range(per_thread):
+            counter.add(1, attributes={"cmd": f"c{index % 4}"})
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(threads_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+        assert not thread.is_alive()
+
+    series = _series(_scrape(port), "salt_test_threads_total")
+    assert series == {
+        f'salt_test_threads_total{{cmd="c{n}"}}': float(per_thread * 4)
+        for n in range(4)
+    }
+
+
+def test_scraping_while_threads_write(tmp_path):
+    port = _configure(tmp_path)
+    writers, per_writer = 4, 2000
+    counter = metrics.counter("salt.test.scrape")
+    done = threading.Event()
+    totals = []
+    errors = []
+
+    def write():
+        for _ in range(per_writer):
+            counter.add(1, attributes={"cmd": "x"})
+
+    def scrape():
+        while not done.is_set():
+            try:
+                series = _series(_scrape(port), "salt_test_scrape_total")
+            except Exception as exc:  # pylint: disable=broad-except
+                errors.append(exc)
+                return
+            totals.append(sum(series.values()))
+
+    scraper = threading.Thread(target=scrape)
+    threads = [threading.Thread(target=write) for _ in range(writers)]
+    scraper.start()
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    done.set()
+    scraper.join(timeout=60)
+
+    assert not errors, errors
+    assert totals, "no scrape completed"
+    # A counter never goes down between two scrapes.
+    assert totals == sorted(totals)
+    final = _series(_scrape(port), "salt_test_scrape_total")
+    assert final == {'salt_test_scrape_total{cmd="x"}': float(writers * per_writer)}

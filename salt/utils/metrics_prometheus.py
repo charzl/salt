@@ -97,6 +97,8 @@ _server: Any = None
 _orig_value_class: Any = None
 _boundaries: dict[str, tuple[float, ...]] = {}
 _target_info: dict[str, str] = {}
+# Problems already reported at warning level; see :func:`_warn_once`.
+_warned: set[str] = set()
 
 _instruments: dict[tuple[str, str], _Instrument] = {}
 _callbacks: dict[str, tuple[_Callback, str, str]] = {}
@@ -208,6 +210,7 @@ def stop() -> None:
     global _start_failed  # pylint: disable=global-statement
     with _lock:
         _start_failed = False
+        _warned.clear()
         if _owner_pid is not None and _owner_pid == os.getpid():
             if isinstance(_server, tuple):
                 try:
@@ -264,6 +267,19 @@ def _use_multiprocess_values() -> None:
     values.ValueClass = values.MultiProcessValue()
 
 
+def _warn_once(key: str, message: str, *args: Any, exc_info: bool = False) -> None:
+    """
+    Log at warning level the first time ``key`` is seen and at debug level
+    afterwards, so a problem on a hot path (or in every worker) shows up
+    once without flooding the log.
+    """
+    if key in _warned:
+        log.debug(message, *args, exc_info=exc_info)
+        return
+    _warned.add(key)
+    log.warning(message, *args, exc_info=exc_info)
+
+
 def _build_target_info(opts: dict[str, Any]) -> dict[str, str]:
     """Labels of the ``target_info`` metric: the service name and ``resource_attributes``."""
     attrs: dict[str, Any] = {"service.name": opts.get("service_name") or "salt"}
@@ -281,7 +297,11 @@ def _parse_boundaries(boundaries_map: Any) -> dict[str, tuple[float, ...]]:
         try:
             parsed[name] = tuple(sorted(float(b) for b in bounds))
         except (TypeError, ValueError):
-            log.warning("Ignoring non-numeric histogram_boundaries for %s", name)
+            _warn_once(
+                f"boundaries:{name}",
+                "Ignoring non-numeric histogram_boundaries for %s",
+                name,
+            )
     return parsed
 
 
@@ -343,7 +363,12 @@ class _Counter(_Instrument):
         try:
             self._child(attributes).inc(amount)
         except Exception:  # pylint: disable=broad-except
-            log.debug("counter %s add failed", self._name, exc_info=True)
+            _warn_once(
+                f"counter:{self._name}",
+                "Prometheus counter %s could not be updated",
+                self._name,
+                exc_info=True,
+            )
 
 
 class _Histogram(_Instrument):
@@ -364,7 +389,12 @@ class _Histogram(_Instrument):
         try:
             self._child(attributes).observe(amount)
         except Exception:  # pylint: disable=broad-except
-            log.debug("histogram %s record failed", self._name, exc_info=True)
+            _warn_once(
+                f"histogram:{self._name}",
+                "Prometheus histogram %s could not be updated",
+                self._name,
+                exc_info=True,
+            )
 
 
 _I = TypeVar("_I", bound=_Instrument)
@@ -415,7 +445,12 @@ class _CallbackCollector:
             try:
                 observations = list(callback(None) or ())
             except Exception:  # pylint: disable=broad-except
-                log.debug("observable gauge %s failed", name, exc_info=True)
+                _warn_once(
+                    f"gauge:{name}",
+                    "Prometheus observable gauge %s could not be read",
+                    name,
+                    exc_info=True,
+                )
                 continue
             labelnames = sorted(
                 {_label_name(k) for obs in observations for k in (obs.attributes or {})}

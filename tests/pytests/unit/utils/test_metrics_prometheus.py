@@ -236,3 +236,34 @@ def test_bind_failure_is_not_retried(tmp_path, monkeypatch):
 
         monkeypatch.setattr(backend._pc.lib, "start_http_server", retried)
         assert backend.start(opts) is False
+
+
+def test_write_failure_is_reported_once(tmp_path, monkeypatch, caplog):
+    _configure(tmp_path)
+    counter = metrics.counter("salt.test.fail")
+
+    def broken(attributes):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(counter, "_child", broken)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            counter.add(1)
+    warnings = [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.WARNING and "salt_test_fail" in rec.getMessage()
+    ]
+    assert len(warnings) == 1
+
+
+def test_bad_histogram_boundaries_are_reported_once(caplog):
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            assert backend._parse_boundaries({"salt.x": ["a", "b"]}) == {}
+    warnings = [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.WARNING and "salt.x" in rec.getMessage()
+    ]
+    assert len(warnings) == 1

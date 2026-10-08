@@ -101,8 +101,6 @@ def test_prometheus_exporter_builds_no_otel_provider(tmp_path):
 
 def test_missing_prometheus_client_is_graceful(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "prometheus_client", None)
-    monkeypatch.setattr(backend, "_pc", None)
-    monkeypatch.setattr(backend, "_load_failed", False)
     metrics.configure(
         {
             "metrics": {"enabled": True, "exporter": "prometheus"},
@@ -229,13 +227,14 @@ def test_bind_failure_is_not_retried(tmp_path, monkeypatch):
                 "multiproc_dir": str(tmp_path / "prom"),
             }
         }
-        assert backend.start(opts) is False
+        instance = backend.PrometheusBackend()
+        assert instance.start(opts) is False
 
         def retried(*args, **kwargs):
             raise AssertionError("tried to bind again")
 
-        monkeypatch.setattr(backend._pc.lib, "start_http_server", retried)
-        assert backend.start(opts) is False
+        monkeypatch.setattr(instance._pc.lib, "start_http_server", retried)
+        assert instance.start(opts) is False
 
 
 def test_write_failure_is_reported_once(tmp_path, monkeypatch, caplog):
@@ -258,9 +257,10 @@ def test_write_failure_is_reported_once(tmp_path, monkeypatch, caplog):
 
 
 def test_bad_histogram_boundaries_are_reported_once(caplog):
+    instance = backend.PrometheusBackend()
     with caplog.at_level(logging.WARNING):
         for _ in range(3):
-            assert backend._parse_boundaries({"salt.x": ["a", "b"]}) == {}
+            assert instance._parse_boundaries({"salt.x": ["a", "b"]}) == {}
     warnings = [
         rec
         for rec in caplog.records

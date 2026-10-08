@@ -57,8 +57,6 @@ import os
 import threading
 from types import SimpleNamespace
 
-import salt.utils.metrics_prometheus
-
 log = logging.getLogger(__name__)
 
 _INSTRUMENTATION_NAME = "salt"
@@ -135,6 +133,9 @@ _provider = None
 _meter = None
 _cached_opts = None
 _atexit_registered = False
+# The backend for ``metrics.exporter``; see :func:`_get_backend`.
+_backend = None
+_backend_lock = threading.Lock()
 
 
 class _NoopCounter:
@@ -159,26 +160,142 @@ _NOOP_HISTOGRAM = _NoopHistogram()
 _NOOP_OBSERVABLE = _NoopObservableGauge()
 
 
+class Backend:
+    """
+    One way of recording and exporting metrics.
+
+    :func:`configure` picks the backend for ``metrics.exporter`` and the
+    public functions of this module delegate to it, so a new family of
+    exporters only needs a new subclass.
+    """
+
+    def available(self):
+        """Return True if the libraries this backend needs can be imported."""
+        raise NotImplementedError
+
+    def start(self, opts):
+        """Prepare this process; return False if metrics cannot run here."""
+        raise NotImplementedError
+
+    def stop(self):
+        """Flush and release what :meth:`start` set up."""
+        raise NotImplementedError
+
+    def counter(self, name, description, unit):
+        raise NotImplementedError
+
+    def histogram(self, name, description, unit):
+        raise NotImplementedError
+
+    def observable_gauge(self, name, callback, description, unit):
+        raise NotImplementedError
+
+    def meter(self):
+        """Return the underlying OTel Meter; only the OTel backend has one."""
+        return None
+
+
+class OTelBackend(Backend):
+    """
+    The OpenTelemetry SDK with a push (OTLP) or console exporter.
+
+    The provider is rebuilt per PID by :func:`_ensure_meter`.
+    """
+
+    def available(self):
+        return _load_otel()
+
+    def start(self, opts):
+        if not _load_otel():
+            log.warning(
+                "metrics.enabled is true but opentelemetry is not installed; "
+                "metrics remain disabled in this process."
+            )
+            return False
+        log.info(
+            "Enabling OpenTelemetry metrics (pid=%d, service=%s, exporter=%s, endpoint=%s)",
+            os.getpid(),
+            opts.get("service_name"),
+            opts.get("exporter"),
+            opts.get("endpoint") or "<default>",
+        )
+        _ensure_meter()
+        return True
+
+    def stop(self):
+        global _provider, _meter, _last_pid  # pylint: disable=global-statement
+        with _lock:
+            provider = _provider
+            _provider = None
+            _meter = None
+            _last_pid = None
+        if provider is not None:
+            try:
+                provider.shutdown()
+            except Exception:  # pylint: disable=broad-except
+                log.debug("metrics provider shutdown raised", exc_info=True)
+
+    def counter(self, name, description, unit):
+        _ensure_meter()
+        if _meter is None:
+            return _NOOP_COUNTER
+        return _meter.create_counter(name, description=description, unit=unit)
+
+    def histogram(self, name, description, unit):
+        _ensure_meter()
+        if _meter is None:
+            return _NOOP_HISTOGRAM
+        return _meter.create_histogram(name, description=description, unit=unit)
+
+    def observable_gauge(self, name, callback, description, unit):
+        _ensure_meter()
+        if _meter is None:
+            return _NOOP_OBSERVABLE
+        return _meter.create_observable_gauge(
+            name, callbacks=[callback], description=description, unit=unit
+        )
+
+    def meter(self):
+        _ensure_meter()
+        return _meter
+
+
+def _get_backend():
+    """
+    Return the backend for ``metrics.exporter``, creating it on first use.
+
+    The same instance is returned from then on, also in forked children,
+    which inherit it.  That is how a child knows the parent has already
+    set things up.
+    """
+    global _backend  # pylint: disable=global-statement
+    exporter = ((_cached_opts or {}).get("exporter") or "").lower()
+    if exporter == "prometheus":
+        # pylint: disable-next=import-outside-toplevel
+        from salt.utils.metrics_prometheus import PrometheusBackend as factory
+    else:
+        factory = OTelBackend
+    backend = _backend
+    if backend.__class__ is not factory:
+        with _backend_lock:
+            if _backend.__class__ is not factory:
+                _backend = factory()
+            backend = _backend
+    return backend
+
+
 def is_enabled():
     """
-    Return True if metrics are configured, enabled, and opentelemetry
-    can be imported.
+    Return True if metrics are configured, enabled, and the libraries of
+    the configured exporter can be imported.
 
     Structured so the disabled path never touches opentelemetry: when
     ``_cached_opts`` is unset or ``enabled`` is false (both true by
-    default), :func:`_load_otel` is not called and the imports stay
-    deferred.
+    default), no backend is created and the imports stay deferred.
     """
     if not _cached_opts or not _cached_opts.get("enabled"):
         return False
-    if _prometheus_selected():
-        return salt.utils.metrics_prometheus.load()
-    return _load_otel()
-
-
-def _prometheus_selected():
-    exporter = (_cached_opts or {}).get("exporter") or ""
-    return exporter.lower() == "prometheus"
+    return _get_backend().available()
 
 
 def configure(opts):
@@ -187,9 +304,9 @@ def configure(opts):
 
     Safe to call multiple times; the provider is rebuilt only when the
     PID changes or the cached configuration is empty.  When metrics are
-    disabled — or when opentelemetry is not installed — this is a cheap
-    no-op that just caches the opts so subsequent calls in fork children
-    can pick up the same setting.
+    disabled — or when the exporter's library is not installed — this is
+    a cheap no-op that just caches the opts so subsequent calls in fork
+    children can pick up the same setting.
     """
     global _cached_opts, _atexit_registered  # pylint: disable=global-statement
     metrics_opts = (opts or {}).get("metrics") or {}
@@ -202,47 +319,19 @@ def configure(opts):
             _cached_opts.get("service_name"),
         )
         return
-    if _prometheus_selected():
-        if not _atexit_registered:
-            atexit.register(shutdown)
-            _atexit_registered = True
-        if not salt.utils.metrics_prometheus.start(_cached_opts):
-            # The cause was logged where it happened (and only once).
-            log.debug("The prometheus metrics backend is not running here.")
-        return
-    if not _load_otel():
-        log.warning(
-            "metrics.enabled is true but opentelemetry is not installed; "
-            "metrics remain disabled in this process."
-        )
-        return
     if not _atexit_registered:
         atexit.register(shutdown)
         _atexit_registered = True
-    log.info(
-        "Enabling OpenTelemetry metrics (pid=%d, service=%s, exporter=%s, endpoint=%s)",
-        os.getpid(),
-        _cached_opts.get("service_name"),
-        _cached_opts.get("exporter"),
-        _cached_opts.get("endpoint") or "<default>",
-    )
-    _ensure_meter()
+    # The backend logs why it could not start, once.
+    _get_backend().start(_cached_opts)
 
 
 def shutdown():
-    """Flush and tear down the active provider."""
-    global _provider, _meter, _last_pid  # pylint: disable=global-statement
-    with _lock:
-        provider = _provider
-        _provider = None
-        _meter = None
-        _last_pid = None
-    salt.utils.metrics_prometheus.stop()
-    if provider is not None:
-        try:
-            provider.shutdown()
-        except Exception:  # pylint: disable=broad-except
-            log.debug("metrics provider shutdown raised", exc_info=True)
+    """Flush and tear down the active backend."""
+    global _backend  # pylint: disable=global-statement
+    backend, _backend = _backend, None
+    if backend is not None:
+        backend.stop()
 
 
 def counter(name, *, description="", unit=""):
@@ -254,12 +343,7 @@ def counter(name, *, description="", unit=""):
     """
     if not is_enabled():
         return _NOOP_COUNTER
-    if _prometheus_selected():
-        return salt.utils.metrics_prometheus.counter(name, description, unit)
-    _ensure_meter()
-    if _meter is None:
-        return _NOOP_COUNTER
-    return _meter.create_counter(name, description=description, unit=unit)
+    return _get_backend().counter(name, description, unit)
 
 
 def histogram(name, *, description="", unit="ms", boundaries=None):
@@ -267,19 +351,14 @@ def histogram(name, *, description="", unit="ms", boundaries=None):
     Create (or fetch) a Histogram instrument.
 
     The ``boundaries`` argument is accepted but ignored at instrument
-    creation time — the OTel SDK takes histogram bucket boundaries from
-    ``View``s attached to the ``MeterProvider``.  Per-metric boundaries
-    are wired up in :func:`_build_provider` from
-    ``opts['metrics']['histogram_boundaries']``.
+    creation time — bucket boundaries come from
+    ``opts['metrics']['histogram_boundaries']``: the OTel SDK takes them
+    from ``View``s attached to the ``MeterProvider`` (see
+    :func:`_build_provider`), the Prometheus backend reads them directly.
     """
     if not is_enabled():
         return _NOOP_HISTOGRAM
-    if _prometheus_selected():
-        return salt.utils.metrics_prometheus.histogram(name, description, unit)
-    _ensure_meter()
-    if _meter is None:
-        return _NOOP_HISTOGRAM
-    return _meter.create_histogram(name, description=description, unit=unit)
+    return _get_backend().histogram(name, description, unit)
 
 
 def observable_gauge(name, callback, *, description="", unit=""):
@@ -296,17 +375,7 @@ def observable_gauge(name, callback, *, description="", unit=""):
     """
     if not is_enabled():
         return _NOOP_OBSERVABLE
-    if _prometheus_selected():
-        salt.utils.metrics_prometheus.observable_gauge(
-            name, callback, description, unit
-        )
-        return _NOOP_OBSERVABLE
-    _ensure_meter()
-    if _meter is None:
-        return _NOOP_OBSERVABLE
-    return _meter.create_observable_gauge(
-        name, callbacks=[callback], description=description, unit=unit
-    )
+    return _get_backend().observable_gauge(name, callback, description, unit)
 
 
 def get_meter(name=_INSTRUMENTATION_NAME):
@@ -315,10 +384,9 @@ def get_meter(name=_INSTRUMENTATION_NAME):
     Useful as an escape hatch for instruments not covered by the
     convenience helpers above.  Always ``None`` with ``exporter: prometheus``.
     """
-    if not is_enabled() or _prometheus_selected():
+    if not is_enabled():
         return None
-    _ensure_meter()
-    return _meter
+    return _get_backend().meter()
 
 
 def _ensure_meter():

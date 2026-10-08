@@ -509,3 +509,10 @@ class SyncWrapper:
             pass
 
     # pylint: enable=W1701
+
+
+# EXPERIMENT (do not merge): route every SyncWrapper user through the shared
+# loop bridge, to see what breaks in CI.
+from salt.utils.asyncbridge import BridgedWrapper as _BridgedWrapper  # noqa: E402
+
+SyncWrapper = _BridgedWrapper

@@ -260,13 +260,12 @@ def test_pool_routing_sync_mode_avoids_pool_worker_count_option(sync_master_opts
     assert "pool_worker_count" not in sync_master_opts
 
 
-def test_publishserver_publish_sync_mode_uses_pub_sock(sync_master_opts):
+def test_publishserver_holds_no_publisher_until_first_publish(sync_master_opts):
     """
-    ``PublishServer.publish`` async-context bypass (per-loop
-    ``_TCPPubServerPublisher`` cache) exists to defuse a nested-
-    SyncWrapper deadlock that can only happen when async handlers
-    invoke ``publish`` from a running asyncio loop.  With the flag off
-    the sync path must run ``self.pub_sock.send(payload)`` directly.
+    ``PublishServer.publish`` always uses the per-loop
+    ``_TCPPubServerPublisher`` cache, whatever ``master_async_mworker``
+    says. Nothing is connected or cached until the first ``publish`` or
+    ``connect``, and there is no ``pub_sock`` sync wrapper any more.
     """
     import salt.transport.tcp
 
@@ -277,9 +276,6 @@ def test_publishserver_publish_sync_mode_uses_pub_sock(sync_master_opts):
         pull_host="127.0.0.1",
         pull_port=0,
     )
-    # Instance MUST NOT hold the per-loop cache when the flag is off
-    # (it is only allocated inside the async branch of ``publish``).
-    assert getattr(ps, "_async_pub_by_loop", None) is None
-    # And the opts we passed in must be visible so ``publish`` can
-    # branch on them.
+    assert ps._async_pub_by_loop is None
+    assert not hasattr(ps, "pub_sock")
     assert ps.opts.get("master_async_mworker") is False

@@ -2349,29 +2349,47 @@ async def test_pub_server_discard_on_close_cancels_read_task(master_opts):
         ), f"Subscriber._read_task not cleared post-close for {client!r}"
 
 
-def test_publish_server_connect_wires_ipc_write_buffer_into_publisher(
-    master_opts,
-):
+class _FakePublisher:
     """
-    ``PublishServer.connect`` must forward ``ipc_write_buffer`` into the
-    ``_TCPPubServerPublisher`` it spins up via ``SyncWrapper``.  Without
-    this wiring the publisher's outbound stream (MWorker fire_event ->
-    EP pull) has no cap even when ``ipc_write_buffer`` is set on the
-    master.
+    Stand-in for ``_TCPPubServerPublisher`` that records how it was built and used.
     """
-    master_opts["ipc_write_buffer"] = 4321
 
-    captured = {}
+    instances = []
 
-    class _FakeSyncWrapper:
-        def __init__(self, cls, args=None, kwargs=None, **_kw):
-            captured["cls"] = cls
-            captured["args"] = args
-            captured["kwargs"] = kwargs
+    def __init__(self, host, port, path, io_loop=None, max_write_buffer_size=None):
+        self.kwargs = {"max_write_buffer_size": max_write_buffer_size}
+        self.stream = MagicMock()
+        self.stream.closed.return_value = False
+        self.connect_timeouts = []
+        self.sent = []
+        self.closed = False
+        self.send_error = None
+        type(self).instances.append(self)
 
-        def connect(self, timeout=None):
-            captured["connect_called"] = True
+    def connect(self, callback=None, timeout=None):
+        self.connect_timeouts.append(timeout)
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(True)
+        return future
 
+    async def send(self, msg, timeout=None, tries=None):
+        if self.send_error is not None:
+            raise self.send_error
+        self.sent.append(msg)
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def fake_publisher():
+    _FakePublisher.instances = []
+    with patch("salt.transport.tcp._TCPPubServerPublisher", _FakePublisher):
+        yield _FakePublisher
+
+
+@pytest.fixture
+def local_publish_server(master_opts):
     server = salt.transport.tcp.PublishServer(
         master_opts,
         pub_host="127.0.0.1",
@@ -2379,12 +2397,204 @@ def test_publish_server_connect_wires_ipc_write_buffer_into_publisher(
         pull_host="127.0.0.1",
         pull_port=2,
     )
-    with patch("salt.utils.asynchronous.SyncWrapper", _FakeSyncWrapper):
-        server.connect(timeout=None)
+    try:
+        yield server
+    finally:
+        server._closing = True  # keep __del__ quiet; nothing real to close
 
-    assert captured["cls"] is salt.transport.tcp._TCPPubServerPublisher
-    assert captured["kwargs"] == {"max_write_buffer_size": 4321}
-    assert captured.get("connect_called") is True
+
+async def test_publish_server_connect_wires_ipc_write_buffer_into_publisher(
+    master_opts, fake_publisher
+):
+    """
+    ``PublishServer.connect`` must forward ``ipc_write_buffer`` into the
+    ``_TCPPubServerPublisher`` it makes.  Without this wiring the publisher's
+    outbound stream (MWorker fire_event -> EP pull) has no cap even when
+    ``ipc_write_buffer`` is set on the master.
+    """
+    master_opts["ipc_write_buffer"] = 4321
+    server = salt.transport.tcp.PublishServer(
+        master_opts,
+        pub_host="127.0.0.1",
+        pub_port=1,
+        pull_host="127.0.0.1",
+        pull_port=2,
+    )
+
+    await server.connect(timeout=7)
+
+    (pub,) = fake_publisher.instances
+    assert pub.kwargs == {"max_write_buffer_size": 4321}
+    assert pub.connect_timeouts == [7]
+    server.close()
+    assert pub.closed is True
+
+
+async def test_publish_server_publish_wires_ipc_write_buffer_into_publisher(
+    master_opts, fake_publisher
+):
+    """
+    The same cap applies when the first ``publish`` makes the connection.
+    """
+    master_opts["ipc_write_buffer"] = 4321
+    server = salt.transport.tcp.PublishServer(
+        master_opts,
+        pub_host="127.0.0.1",
+        pub_port=1,
+        pull_host="127.0.0.1",
+        pull_port=2,
+    )
+
+    await server.publish(b"payload")
+
+    (pub,) = fake_publisher.instances
+    assert pub.kwargs == {"max_write_buffer_size": 4321}
+    server.close()
+
+
+async def test_publish_server_publish_connects_once_and_reuses(
+    local_publish_server, fake_publisher
+):
+    await local_publish_server.publish(b"one")
+    await local_publish_server.publish(b"two")
+
+    (pub,) = fake_publisher.instances
+    assert pub.sent == [b"one", b"two"]
+    local_publish_server.drop_publishers()
+
+
+async def test_publish_server_publish_does_not_use_a_sync_wrapper(
+    local_publish_server, fake_publisher
+):
+    """
+    ``publish`` runs on the caller's loop with the raw publisher. A sync
+    wrapper here is what made ``fire_event`` deadlock when it was itself
+    called through a wrapper.
+    """
+    with patch("salt.utils.asynchronous.SyncWrapper") as sync_wrapper:
+        await local_publish_server.publish(b"payload")
+
+    sync_wrapper.assert_not_called()
+    assert not hasattr(local_publish_server, "pub_sock")
+    local_publish_server.drop_publishers()
+
+
+async def test_publish_server_drop_publishers_closes_all_and_next_publish_reconnects(
+    local_publish_server, fake_publisher
+):
+    await local_publish_server.publish(b"one")
+    (first,) = fake_publisher.instances
+
+    local_publish_server.drop_publishers()
+    assert first.closed is True
+
+    await local_publish_server.publish(b"two")
+    assert len(fake_publisher.instances) == 2
+    assert fake_publisher.instances[1].sent == [b"two"]
+    local_publish_server.drop_publishers()
+
+
+async def test_publish_server_publish_reconnects_once_when_the_stream_closes(
+    local_publish_server, fake_publisher
+):
+    await local_publish_server.publish(b"one")
+    (first,) = fake_publisher.instances
+    first.send_error = tornado.iostream.StreamClosedError()
+
+    await local_publish_server.publish(b"two")
+
+    assert first.closed is True
+    assert len(fake_publisher.instances) == 2
+    assert fake_publisher.instances[1].sent == [b"two"]
+    local_publish_server.drop_publishers()
+
+
+def test_publish_server_called_through_a_sync_wrapper_from_a_running_loop(master_opts):
+    """
+    ``SaltEvent.pusher`` is a ``SyncWrapper`` around ``PublishServer``. Both a
+    plain call and a call made from a thread that already runs a loop must
+    deliver to a real pull socket and return. (Before ``publish`` stopped using
+    a second wrapper the in-a-loop call went through two nested wrappers.)
+    """
+    import socket as _socket
+    import threading
+    import time
+
+    import salt.utils.asynchronous
+
+    received = bytearray()
+    listener = _socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(5)
+    port = listener.getsockname()[1]
+    stop = threading.Event()
+
+    def serve():
+        listener.settimeout(0.1)
+        conns = []
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+                conn.settimeout(0.05)
+                conns.append(conn)
+            except OSError:
+                pass
+            for conn in conns:
+                try:
+                    data = conn.recv(4096)
+                except OSError:
+                    continue
+                if data:
+                    received.extend(data)
+        for conn in conns:
+            conn.close()
+
+    server_thread = threading.Thread(target=serve, daemon=True)
+    server_thread.start()
+
+    pusher = salt.utils.asynchronous.SyncWrapper(
+        salt.transport.tcp.PublishServer,
+        args=(master_opts,),
+        kwargs={
+            "pub_host": "127.0.0.1",
+            "pub_port": 1,
+            "pull_host": "127.0.0.1",
+            "pull_port": port,
+        },
+    )
+    outcome = {}
+
+    async def from_running_loop():
+        pusher.publish(b"nested-call")
+
+    def run_nested():
+        try:
+            asyncio.run(from_running_loop())
+        except BaseException as exc:  # pylint: disable=broad-except
+            outcome["error"] = exc
+
+    def wait_for(needle):
+        deadline = time.time() + 5
+        while needle not in received and time.time() < deadline:
+            time.sleep(0.05)
+        return needle in received
+
+    try:
+        pusher.connect(timeout=5)
+        pusher.publish(b"plain-call")
+        assert wait_for(b"plain-call")
+
+        nested = threading.Thread(target=run_nested, daemon=True)
+        nested.start()
+        nested.join(timeout=15)
+        assert not nested.is_alive(), "publish through the wrapper hung in a loop"
+        assert "error" not in outcome, outcome.get("error")
+        assert wait_for(b"nested-call")
+    finally:
+        pusher.close()
+        stop.set()
+        server_thread.join(timeout=5)
+        listener.close()
 
 
 def test_publish_server_del_safety_net_calls_close_70175(master_opts):
@@ -2397,7 +2607,7 @@ def test_publish_server_del_safety_net_calls_close_70175(master_opts):
 
     1. Emit the ``ResourceWarning`` so the leaky caller still surfaces
        for tracking (behavior preserved from the warn-only revision).
-    2. Fall back to ``close()`` so the ``pub_sock`` / ``pub_server`` /
+    2. Fall back to ``close()`` so the ``pub_server`` /
        ``pull_sock`` / io_loop / per-loop cached publishers are
        released, converting a ~50 MB/hr RSS leak into a bounded per-GC
        cleanup.
@@ -2413,13 +2623,11 @@ def test_publish_server_del_safety_net_calls_close_70175(master_opts):
 
     # Wire fake sub-resources so we can observe that close() actually
     # traversed them. Each mock records whether ``close()`` was called.
-    saved_pub_sock = MagicMock()
     saved_pub_server = MagicMock()
     saved_pull_sock = MagicMock()
     saved_io_loop = MagicMock()
     stale_pub = MagicMock()
     stale_pub.close = MagicMock()
-    server.pub_sock = saved_pub_sock
     server.pub_server = saved_pub_server
     server.pull_sock = saved_pull_sock
     server.io_loop = saved_io_loop
@@ -2440,7 +2648,6 @@ def test_publish_server_del_safety_net_calls_close_70175(master_opts):
 
     # 2. Safety-net close() ran -- observed via the sub-resource mocks
     #    (each ``.close()`` was invoked exactly once by ``PublishServer.close``).
-    saved_pub_sock.close.assert_called_once()
     saved_pub_server.close.assert_called_once()
     saved_pull_sock.close.assert_called_once()
     # 3. io_loop had stop() + close() driven.
@@ -2524,11 +2731,11 @@ def test_publish_server_del_forked_child_does_not_close_parent_fds_70175(
     assert creator_pid > 0
     assert server._closing is False
 
-    saved_pub_sock = MagicMock()
+    saved_pub = MagicMock()
     saved_pub_server = MagicMock()
     saved_pull_sock = MagicMock()
     saved_io_loop = MagicMock()
-    server.pub_sock = saved_pub_sock
+    server._async_pub_by_loop = {"loop-key": (saved_pub, MagicMock())}
     server.pub_server = saved_pub_server
     server.pull_sock = saved_pull_sock
     server.io_loop = saved_io_loop
@@ -2556,7 +2763,7 @@ def test_publish_server_del_forked_child_does_not_close_parent_fds_70175(
     #    sub-resources are untouched.  Without the guard, close() would
     #    have called close() on each of them, tearing down FDs the
     #    parent still owns.
-    saved_pub_sock.close.assert_not_called()
+    saved_pub.close.assert_not_called()
     saved_pub_server.close.assert_not_called()
     saved_pull_sock.close.assert_not_called()
     saved_io_loop.stop.assert_not_called()

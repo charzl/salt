@@ -1,0 +1,66 @@
+name: CI Lite
+
+on:
+  push:
+    branches: ["ci-lite/**"]
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: baseline
+            ref: f37cdcd1c9
+          - name: 4a
+            ref: charzl/flatten-publishserver-pub-sock
+          - name: v2
+            ref: charzl/shared-loop-bridge-experiment-all-v2
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libzmq3-dev libssl-dev
+      - name: Install python deps
+        run: |
+          python -m pip install -U pip wheel setuptools
+          pip install -r requirements/static/ci/py3.11/linux.txt
+          pip install -e . --no-deps
+      - name: Run tests
+        env:
+          RAISE_DEPRECATIONS_RUNTIME_ERRORS: "1"
+        run: |
+          mkdir -p out
+          python -m pytest --core-tests -p no:cacheprovider --timeout=300 -q \
+            --junitxml=out/junit.xml -o junit_family=xunit1 \
+            tests/pytests/unit/transport \
+            tests/pytests/unit/channel \
+            tests/pytests/unit/utils/event \
+            tests/pytests/unit/utils/test_asyncbridge.py \
+            tests/pytests/unit/utils/test_asynchronous.py \
+            tests/pytests/unit/test_master_async_optin.py \
+            tests/pytests/functional/transport \
+            tests/pytests/integration/events \
+            tests/pytests/integration/master \
+            tests/pytests/integration/minion \
+            tests/pytests/integration/cli 2>&1 | tee out/pytest.log
+        continue-on-error: true
+      - name: Summary
+        if: always()
+        run: |
+          tail -n 60 out/pytest.log || true
+          grep -E "^(FAILED|ERROR) " out/pytest.log | sort > out/failures.txt || true
+          wc -l out/failures.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.name }}
+          path: out/

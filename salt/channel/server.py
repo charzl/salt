@@ -4114,16 +4114,12 @@ class MasterPubServerChannel:
                         "resetting pusher for reconnect",
                         peer,
                     )
-                    # Reset the broken pub_sock so the next publish attempt
+                    # Drop the broken connection so the next publish attempt
                     # triggers a fresh TCP connection rather than reusing a
                     # dead stream.
                     for pusher in self.pushers:
-                        if pusher.pull_host == peer and pusher.pub_sock is not None:
-                            try:
-                                pusher.pub_sock.close()
-                            except Exception:  # pylint: disable=broad-except
-                                pass
-                            pusher.pub_sock = None
+                        if pusher.pull_host == peer:
+                            pusher.drop_publishers()
                     # Schedule an AES-key re-announcement so the peer
                     # learns our key after it reconnects.
                     self.io_loop.call_later(2.0, self.send_aes_key_event)

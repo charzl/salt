@@ -1,6 +1,8 @@
 name: CI Lite
 
 on:
+  pull_request:
+    branches: ["**"]
   push:
     branches: ["ci-lite/**"]
   workflow_dispatch:

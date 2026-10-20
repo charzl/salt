@@ -164,7 +164,6 @@ def show_dbs(*dbs):
             result[db] = __salt__["pillar.get"]("oracle:dbs:" + db, unmask=True)
         return result
     else:
-        # display only: keep the credentials masked
         pillar_dbs = __salt__["pillar.get"]("oracle:dbs", unmask=False)
         log.debug("get all (%s) dbs from pillar", len(pillar_dbs))
         return pillar_dbs
@@ -227,7 +226,6 @@ def show_pillar(item=None):
         salt '*' oracle.show_pillar
         salt '*' oracle.show_pillar dbs:my_db
     """
-    # display only: keep the credentials masked
     if item:
         return __salt__["pillar.get"]("oracle:" + item, unmask=False)
     else:

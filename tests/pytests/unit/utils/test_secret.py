@@ -510,7 +510,6 @@ def test_unmask_values_for_job(fun, expected_masked):
     """Real values inside the job, except when the job itself is pillar.*."""
     with secret.unmask_values_for_job(fun):
         assert secret.values_masked() is expected_masked
-        # repr() stays redacted either way
         assert "v" not in repr(secret.hide({"k": "v"}))
     assert secret.mask_values.get() is None
     assert secret.values_masked() is True

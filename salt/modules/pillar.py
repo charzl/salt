@@ -690,9 +690,9 @@ def ext(external, pillar=None, unmask=None):
     unmask
         If set to ``True``, the pillar data will be returned unmasked. If set
         to ``False``, masked values are returned. The default of ``None``
-        auto-detects via :func:`salt.utils.secret.values_masked`, so direct
-        user invocations see plain values while invocations from inside the
-        renderer/state pipeline stay masked.
+        auto-detects from the :func:`salt.utils.secret.mask_pillar` context
+        variable so direct user invocations see plain values while invocations
+        from inside the renderer/state pipeline stay masked.
 
         .. versionadded:: 3008.2
 

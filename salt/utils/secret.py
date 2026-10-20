@@ -40,20 +40,13 @@ log = logging.getLogger(__name__)
 
 # When True (default), pillar output is masked. Template renderers set this to
 # False so that SLS files receive plain values via salt["pillar.get"](…).
-#
-# This is the *display* switch: it controls whether MaskedDict/MaskedList
-# redact themselves in repr()/str(). Unless ``mask_values`` is set, it also
-# decides whether the pillar functions return masked *values*.
 mask_pillar: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "mask_pillar", default=True
 )
 
-# Independent override for the *value* switch: whether pillar.get/items/item/
-# ext replace values with the placeholder when the caller didn't pass
-# ``unmask``. ``None`` (default) follows ``mask_pillar``, so code that only
-# sets ``mask_pillar`` behaves exactly as before. Setting it to ``False`` while
-# ``mask_pillar`` stays ``True`` returns real values but keeps repr()/str()
-# (and therefore logging) redacted.
+# Whether the pillar functions return masked values when the caller passes no
+# ``unmask``. ``None`` follows ``mask_pillar``; ``False`` returns real values
+# while repr()/str() stay redacted.
 mask_values: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
     "mask_values", default=None
 )

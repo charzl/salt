@@ -377,7 +377,6 @@ def test_get_default_follows_mask_values_not_repr_switch():
             assert secret.mask_pillar.get() is True
             assert pillarmod.get("foo") == 42
             assert pillarmod.get("db") == {"password": "pw"}
-            # Explicit caller choice still wins.
             assert pillarmod.get("foo", unmask=False) == secret.REDACT_PLACEHOLDER
             assert secret.REDACT_PLACEHOLDER in repr(secret.hide({"foo": 42}))
         finally:

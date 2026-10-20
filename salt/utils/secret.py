@@ -77,10 +77,8 @@ def unmask_values_for_job(fun):
     Jobs whose own function is a ``pillar.*`` function keep the masked
     default, since their return value is what the user sees.
     """
-    if str(fun or "").split(".", 1)[0] == "pillar":
-        yield
-        return
-    token = mask_values.set(False)
+    is_pillar_job = str(fun or "").split(".", 1)[0] == "pillar"
+    token = mask_values.set(is_pillar_job)
     try:
         yield
     finally:

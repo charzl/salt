@@ -40,6 +40,8 @@ log = logging.getLogger(__name__)
 
 # When True (default), pillar output is masked. Template renderers set this to
 # False so that SLS files receive plain values via salt["pillar.get"](…).
+# It controls display (repr()/str(), logging) and is the fallback for
+# ``mask_values`` below, which controls whether returned values are masked.
 mask_pillar: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "mask_pillar", default=True
 )

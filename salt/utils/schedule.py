@@ -41,6 +41,7 @@ import salt.utils.master
 import salt.utils.minion
 import salt.utils.platform
 import salt.utils.process
+import salt.utils.secret
 import salt.utils.stringutils
 import salt.utils.user
 import salt.utils.yaml
@@ -925,7 +926,8 @@ class Schedule:
 
             self.functions.pack["__context__"]["retcode"] = 0
 
-            ret["return"] = dispatch_functions[func](*args, **kwargs)
+            with salt.utils.secret.unmask_values_for_job(func):
+                ret["return"] = dispatch_functions[func](*args, **kwargs)
 
             if not self.standalone:
                 # runners do not provide retcode

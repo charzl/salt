@@ -15,11 +15,5 @@ def execute(opts, data, func, args, kwargs):
     ``pillar.*`` function keep the masked default, since their return value is
     what the user sees.
     """
-    module = str((data or {}).get("fun") or "").split(".", 1)[0]
-    if module == "pillar":
+    with salt.utils.secret.unmask_values_for_job((data or {}).get("fun")):
         return func(*args, **kwargs)
-    token = salt.utils.secret.mask_values.set(False)
-    try:
-        return func(*args, **kwargs)
-    finally:
-        salt.utils.secret.mask_values.reset(token)

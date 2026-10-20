@@ -480,3 +480,48 @@ def test_handle_func_check_dicts(schedule):
             assert schedule.functions != {}
             assert schedule.returners != {}
             assert schedule.utils != {}
+
+
+@pytest.mark.parametrize(
+    "fun,expected_masked",
+    [("mine.update", False), ("test.arg", False), ("pillar.items", True)],
+)
+def test_handle_func_unmasks_pillar_values_except_for_pillar_jobs(
+    schedule, fun, expected_masked
+):
+    """
+    Scheduled jobs (``__mine_interval`` included) get real values from
+    ``pillar.*`` called without ``unmask``, like jobs run via direct_call. A
+    scheduled ``pillar.*`` function keeps the masked default.
+    """
+    seen = []
+
+    def job(*args, **kwargs):
+        seen.append(salt.utils.secret.values_masked())
+
+    class Functions(dict):
+        pack = {"__context__": {}}
+
+    schedule.functions = Functions({fun: job})
+    data = {
+        "function": fun,
+        "run": True,
+        "name": "testjob",
+        "seconds": 60,
+        "_splay": None,
+        "_seconds": 60,
+        "jid_include": True,
+        "maxrunning": 1,
+        "_next_fire_time": datetime.datetime(2018, 11, 21, 14, 8, 53, 903438),
+    }
+
+    # Keep the fake functions: handle_func reloads them on spawning platforms
+    # and with the zeromq transport.
+    schedule.opts["transport"] = "tcp"
+    with patch("salt.utils.process.daemonize"), patch("sys.platform", "linux2"):
+        with patch("salt.utils.platform.spawning_platform", return_value=False):
+            with patch.object(schedule, "standalone", return_value=True):
+                schedule.handle_func(False, fun, data)
+
+    assert seen == [expected_masked]
+    assert salt.utils.secret.values_masked() is True

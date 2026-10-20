@@ -4,6 +4,8 @@ Tests for salt.utils.secret (MaskedDict, MaskedList, hide/expose/serial/mask_out
 
 import copy
 
+import pytest
+
 import salt.utils.secret as secret
 
 # ---------------------------------------------------------------------------
@@ -492,3 +494,23 @@ def test_mask_values_overrides_mask_pillar():
     finally:
         secret.mask_values.reset(values_token)
         secret.mask_pillar.reset(pillar_token)
+
+
+@pytest.mark.parametrize(
+    "fun,expected_masked",
+    [
+        ("test.ping", False),
+        ("mine.update", False),
+        ("pillar.items", True),
+        ("pillar.get", True),
+        (None, False),
+    ],
+)
+def test_unmask_values_for_job(fun, expected_masked):
+    """Real values inside the job, except when the job itself is pillar.*."""
+    with secret.unmask_values_for_job(fun):
+        assert secret.values_masked() is expected_masked
+        # repr() stays redacted either way
+        assert "v" not in repr(secret.hide({"k": "v"}))
+    assert secret.mask_values.get() is None
+    assert secret.values_masked() is True

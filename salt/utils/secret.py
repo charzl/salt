@@ -30,6 +30,7 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import copy
 import logging
@@ -69,6 +70,26 @@ def values_masked() -> bool:
     if override is None:
         return mask_pillar.get()
     return override
+
+
+@contextlib.contextmanager
+def unmask_values_for_job(fun):
+    """
+    While a job runs, make ``pillar.get/items/item/ext`` return real values
+    to code that calls them without ``unmask``. ``repr()`` and logging of
+    pillar data stay redacted.
+
+    Jobs whose own function is a ``pillar.*`` function keep the masked
+    default, since their return value is what the user sees.
+    """
+    if str(fun or "").split(".", 1)[0] == "pillar":
+        yield
+        return
+    token = mask_values.set(False)
+    try:
+        yield
+    finally:
+        mask_values.reset(token)
 
 
 # ---------------------------------------------------------------------------

@@ -1345,7 +1345,10 @@ def test_compile_pillar_cache(master_opts):
     ):
         # Run once for pillarenv base
         pillar.compile_pillar()
-        expected_cache = {("pillar", "mocked_minion:base"): [ANY, None, {"foo": "bar"}]}
+        expected_cache = {
+            ("pillar", "mocked_minion:base"): [ANY, None, {"foo": "bar"}],
+            ("pillar", "mocked_minion"): [ANY, None, {"foo": "bar"}],
+        }
         assert pillar.cache.storage == expected_cache
 
         # Run a second time for pillarenv base
@@ -1360,12 +1363,43 @@ def test_compile_pillar_cache(master_opts):
         expected_cache = {
             ("pillar", "mocked_minion:base"): [ANY, None, {"foo": "bar"}],
             ("pillar", "mocked_minion:dev"): [ANY, None, {"foo": "baz"}],
+            ("pillar", "mocked_minion"): [ANY, None, {"foo": "baz"}],
         }
         assert pillar.cache.storage == expected_cache
 
         # Run a second time for pillarenv dev
         pillar.compile_pillar()
         assert pillar.cache.storage == expected_cache
+
+
+def test_compile_pillar_stores_pillar_by_minion_id_for_targeting(master_opts, grains):
+    """
+    With a ``pillarenv`` the cache key is ``<id>:<pillarenv>``, but targeting
+    (-I, -J) fetches the ``pillar`` bank by plain minion id.
+    """
+    master_opts.update({"pillar_cache": False, "minion_data_cache": True})
+    pillar = salt.pillar.PillarCache(
+        master_opts, grains, "mocked_minion", "fake_env", pillarenv="base"
+    )
+    with patch("salt.pillar.Pillar.compile_pillar", return_value={"foo": "bar"}):
+        pillar.compile_pillar()
+    assert pillar.cache.fetch("pillar", "mocked_minion") == {"foo": "bar"}
+
+
+def test_compile_pillar_skips_plain_id_key_without_minion_data_cache(
+    master_opts, grains
+):
+    master_opts.update({"pillar_cache": True, "minion_data_cache": False})
+    pillar = salt.pillar.PillarCache(
+        master_opts, grains, "mocked_minion", "fake_env", pillarenv="base"
+    )
+    with patch(
+        "salt.pillar.Pillar.compile_pillar", return_value={"foo": "bar"}
+    ), patch.object(pillar.cache, "fetch", return_value=None), patch.object(
+        pillar.cache, "store"
+    ) as store_mock:
+        pillar.compile_pillar()
+    store_mock.assert_called_once_with("pillar", "mocked_minion:base", {"foo": "bar"})
 
 
 def test_compile_pillar_disk_cache(master_opts, grains):
@@ -1413,7 +1447,9 @@ def test_compile_pillar_disk_cache(master_opts, grains):
 
         expected_stores = [
             call("pillar", "mocked_minion:base", {"foo": "bar"}),
+            call("pillar", "mocked_minion", {"foo": "bar"}),
             call("pillar", "mocked_minion:dev", {"foo": "baz"}),
+            call("pillar", "mocked_minion", {"foo": "baz"}),
         ]
 
         # Assert all calls match the pattern

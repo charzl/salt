@@ -5122,21 +5122,28 @@ Recursively merge lists by aggregating them instead of replacing them.
 
 .. versionadded:: 3008.3
 
-Default: ``True``
+Default: ``False``
 
-Changes the *default* behavior of :py:func:`pillar.items
-<salt.modules.pillar.items>` when a caller doesn't explicitly pass
-``unmask``. When ``True`` (the default), ``pillar.items`` returns masked
-values (``**********``) by default, matching :py:func:`pillar.get
-<salt.modules.pillar.get>` and friends. Set to ``False`` to make
-``pillar.items`` default to returning real, unmasked values instead —
-useful for sites relying on the pre-masking ``pillar.items`` behavior.
+Feature flag for pillar masking in :py:func:`pillar.get
+<salt.modules.pillar.get>`, :py:func:`pillar.item
+<salt.modules.pillar.item>`, :py:func:`pillar.items
+<salt.modules.pillar.items>` and :py:func:`pillar.ext
+<salt.modules.pillar.ext>`.
 
-This option does **not** disable pillar masking elsewhere: ``pillar.get``,
-``pillar.item``, ``pillar.raw``, ``pillar.ext``, ``no_log`` state output,
-and the general CLI output safety net are unaffected and keep redacting by
-default regardless of this setting. Callers of ``pillar.items`` can always
-override the default explicitly with ``unmask=True``/``unmask=False``.
+When ``False`` (the default), they return real values and the ``unmask``
+argument has no effect. When ``True``, they return masked values
+(``**********``) unless a caller passes ``unmask=True`` for a single call or
+state.
+
+.. versionchanged:: 3008.4
+    The default is now ``False``, and the option applies to ``pillar.get``,
+    ``pillar.item`` and ``pillar.ext`` too. Before, the default was ``True``
+    and the option only changed the default of ``pillar.items``.
+
+This option does **not** change ``no_log`` state output or the ``repr()`` of
+``__pillar__`` itself, which keep redacting. The values returned by the
+functions above are plain data when they are not masked, so they are not
+redacted if they are logged or returned.
 
 .. code-block:: yaml
 

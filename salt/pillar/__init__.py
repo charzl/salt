@@ -1530,6 +1530,12 @@ class PillarCache(Pillar):
             pillar_data = super().compile_pillar(*args, **kwargs)
 
             self.cache.store("pillar", self.pillar_key, pillar_data)
+            if self.opts["minion_data_cache"] and self.pillar_key != self.minion_id:
+                # Targeting (-I, -J) reads this bank by plain minion id.
+                # Known issue: this is only written on a cache miss, so with
+                # pillar_cache enabled it is not refreshed on a hit, and a
+                # request with another pillarenv overwrites it.
+                self.cache.store("pillar", self.minion_id, pillar_data)
 
         # we dont want the pillar_override baked into the cached compile_pillar from above
         if self.pillar_override:

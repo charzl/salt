@@ -23,6 +23,22 @@ __proxyenabled__ = ["*"]
 log = logging.getLogger(__name__)
 
 
+def _masking_enabled():
+    return __opts__.get("pillar_mask_output", False)
+
+
+def _resolve_unmask(unmask):
+    """
+    ``pillar_mask_output`` is a feature flag: with it off, nothing is masked
+    and ``unmask`` has no effect.
+    """
+    if not _masking_enabled():
+        return True
+    if unmask is None:
+        return not salt.utils.secret.mask_pillar.get()
+    return unmask
+
+
 def get(
     key,
     default=NOT_SET,
@@ -118,7 +134,11 @@ def get(
         .. versionadded:: 2017.7.0
 
     unmask
-        If set to ``True``, the pillar data will be unmasked.
+        If set to ``True``, the pillar data will be unmasked. If not set, the
+        default is unmasked when the current render context has already
+        disabled masking. Has no effect when the
+        :conf_minion:`pillar_mask_output` config option is ``False`` (the
+        default), since nothing is masked then.
 
         .. versionadded:: 3008.0
 
@@ -145,8 +165,7 @@ def get(
         else items(saltenv=saltenv, pillarenv=pillarenv)
     )
 
-    if unmask is None:
-        unmask = not salt.utils.secret.mask_pillar.get()
+    unmask = _resolve_unmask(unmask)
 
     if merge:
         if isinstance(default, dict):
@@ -255,9 +274,10 @@ def items(
 
     unmask
         If set to ``True``, the pillar data will be unmasked. If not set, the
-        default is unmasked when either the current render context has
-        already disabled masking, or the :conf_minion:`pillar_mask_output`
-        config option is set to ``False``.
+        default is unmasked when the current render context has already
+        disabled masking. Has no effect when the
+        :conf_minion:`pillar_mask_output` config option is ``False`` (the
+        default), since nothing is masked then.
 
         .. versionadded:: 3008.0
 
@@ -299,15 +319,7 @@ def items(
         pillarenv=pillarenv,
     )
     ret = pillar.compile_pillar()
-    if unmask is None:
-        # VCOPS-98852: pillar_mask_output only changes items()'s *default*
-        # when the caller didn't explicitly request masked/unmasked output —
-        # it does not disable masking elsewhere (pillar.get/item/raw/ext,
-        # no_log states, or the general output safety net keep their own
-        # existing behavior regardless of this option).
-        unmask = not salt.utils.secret.mask_pillar.get() or not __opts__.get(
-            "pillar_mask_output", True
-        )
+    unmask = _resolve_unmask(unmask)
     if unmask:
         return salt.utils.secret.expose(ret)
     else:
@@ -562,7 +574,11 @@ def item(
         .. versionadded:: 2017.7.6,2018.3.1
 
     unmask
-        If set to ``True``, the pillar data will be unmasked.
+        If set to ``True``, the pillar data will be unmasked. If not set, the
+        default is unmasked when the current render context has already
+        disabled masking. Has no effect when the
+        :conf_minion:`pillar_mask_output` config option is ``False`` (the
+        default), since nothing is masked then.
 
         .. versionadded:: 3008.0
 
@@ -588,8 +604,7 @@ def item(
         else items(saltenv=saltenv, pillarenv=pillarenv)
     )
 
-    if unmask is None:
-        unmask = not salt.utils.secret.mask_pillar.get()
+    unmask = _resolve_unmask(unmask)
 
     try:
         for arg in args:
@@ -630,7 +645,7 @@ def raw(key=None, unmask=None):
 
         salt '*' pillar.raw key='roles'
     """
-    if unmask is None:
+    if unmask is None or not _masking_enabled():
         unmask = True
 
     if key:
@@ -692,7 +707,9 @@ def ext(external, pillar=None, unmask=None):
         to ``False``, masked values are returned. The default of ``None``
         auto-detects from the :func:`salt.utils.secret.mask_pillar` context
         variable so direct user invocations see plain values while invocations
-        from inside the renderer/state pipeline stay masked.
+        from inside the renderer/state pipeline stay masked. Has no effect
+        when the :conf_minion:`pillar_mask_output` config option is ``False``
+        (the default), since nothing is masked then.
 
         .. versionadded:: 3008.2
 
@@ -717,8 +734,7 @@ def ext(external, pillar=None, unmask=None):
 
     ret = pillar_obj.compile_pillar()
 
-    if unmask is None:
-        unmask = not salt.utils.secret.mask_pillar.get()
+    unmask = _resolve_unmask(unmask)
 
     if unmask:
         return salt.utils.secret.expose(ret)

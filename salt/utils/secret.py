@@ -43,6 +43,18 @@ mask_pillar: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "mask_pillar", default=True
 )
 
+# Whether repr() and str() of the masked containers redact their values. It is
+# set once per process from ``pillar_mask_output``. It does not affect
+# serial() or mask_output(), which only depend on a value being wrapped.
+_repr_masking: bool = True
+
+
+def set_repr_masking(enabled):
+    """Turn redaction in repr() and str() of masked containers on or off."""
+    global _repr_masking  # pylint: disable=global-statement
+    _repr_masking = bool(enabled)
+
+
 REDACT_PLACEHOLDER = "**********"
 
 
@@ -51,17 +63,14 @@ REDACT_PLACEHOLDER = "**********"
 # ---------------------------------------------------------------------------
 
 
-def _mask_wrap(value, mask_repr=None):
+def _mask_wrap(value):
     """Wrap nested containers; leave scalar values (str, int, bool …) plain."""
     if isinstance(value, (MaskedDict, MaskedList)):
-        if mask_repr is None or value._mask_repr == mask_repr:
-            return value
-    if mask_repr is None:
-        mask_repr = True
+        return value
     if isinstance(value, dict):
-        return MaskedDict(value, _mask_repr=mask_repr)
+        return MaskedDict(value)
     if isinstance(value, list):
-        return MaskedList(value, _mask_repr=mask_repr)
+        return MaskedList(value)
     return value
 
 
@@ -105,16 +114,12 @@ class MaskedDict(dict):
     Nested dicts and lists are automatically wrapped in MaskedDict / MaskedList.
     """
 
-    def __init__(self, *args, _mask_repr=True, **kwargs):
-        self._mask_repr = _mask_repr
+    def __init__(self, *args, **kwargs):
         super().__init__()
         self.update(*args, **kwargs)
 
     def __setitem__(self, key, value):
-        # Pickle can restore items before it restores the display policy.
-        dict.__setitem__(
-            self, key, _mask_wrap(value, getattr(self, "_mask_repr", None))
-        )
+        dict.__setitem__(self, key, _mask_wrap(value))
 
     def update(self, other=None, **kwargs):
         if other is not None:
@@ -125,24 +130,20 @@ class MaskedDict(dict):
             self[k] = v
 
     def __repr__(self):
-        if not self._mask_repr or not mask_pillar.get():
+        if not (_repr_masking and mask_pillar.get()):
             return dict.__repr__(self)
         return _masked_repr(self)
 
     def __str__(self):
-        if not self._mask_repr or not mask_pillar.get():
+        if not (_repr_masking and mask_pillar.get()):
             return dict.__repr__(self)
         return _masked_repr(self)
 
     def __dict__(self):
         return self
 
-    def __setstate__(self, state):
-        for key, value in state.items():
-            setattr(self, key, value)
-
     def copy(self):
-        return MaskedDict(dict.copy(self), _mask_repr=self._mask_repr)
+        return MaskedDict(dict.copy(self))
 
     def __copy__(self):
         return self.copy()
@@ -157,13 +158,10 @@ class MaskedDict(dict):
         return MaskedDict(dict.__imul__(self, other))
 
     def __deepcopy__(self, memo):
-        return MaskedDict(
-            {k: copy.deepcopy(v, memo) for k, v in dict.items(self)},
-            _mask_repr=self._mask_repr,
-        )
+        return MaskedDict({k: copy.deepcopy(v, memo) for k, v in dict.items(self)})
 
     def setdefault(self, key, default=None):
-        return dict.setdefault(self, key, _mask_wrap(default, self._mask_repr))
+        return dict.setdefault(self, key, _mask_wrap(default))
 
 
 class MaskedList(list):
@@ -173,58 +171,53 @@ class MaskedList(list):
     Nested dicts and lists are automatically wrapped.
     """
 
-    def __init__(self, iterable=(), *, _mask_repr=True):
-        self._mask_repr = _mask_repr
-        super().__init__(_mask_wrap(v, self._mask_repr) for v in iterable)
+    def __init__(self, iterable=()):
+        super().__init__(_mask_wrap(v) for v in iterable)
 
     def __setitem__(self, idx, value):
-        list.__setitem__(self, idx, _mask_wrap(value, self._mask_repr))
+        list.__setitem__(self, idx, _mask_wrap(value))
 
     def append(self, value):
-        # Pickle can restore items before it restores the display policy.
-        list.append(self, _mask_wrap(value, getattr(self, "_mask_repr", None)))
+        list.append(self, _mask_wrap(value))
 
     def extend(self, iterable):
         for v in iterable:
             self.append(v)
 
     def insert(self, idx, value):
-        list.insert(self, idx, _mask_wrap(value, self._mask_repr))
+        list.insert(self, idx, _mask_wrap(value))
 
     def __iadd__(self, iterable):
         self.extend(iterable)
         return self
 
     def __add__(self, other):
-        return MaskedList(list.__add__(self, other), _mask_repr=self._mask_repr)
+        return MaskedList(list.__add__(self, other))
 
     def __mul__(self, other):
-        return MaskedList(list.__mul__(self, other), _mask_repr=self._mask_repr)
+        return MaskedList(list.__mul__(self, other))
 
     def __imul__(self, other):
-        return MaskedList(list.__imul__(self, other), _mask_repr=self._mask_repr)
+        return MaskedList(list.__imul__(self, other))
 
     def __repr__(self):
-        if not self._mask_repr or not mask_pillar.get():
+        if not (_repr_masking and mask_pillar.get()):
             return list.__repr__(self)
         return _masked_repr(self)
 
     def __str__(self):
-        if not self._mask_repr or not mask_pillar.get():
+        if not (_repr_masking and mask_pillar.get()):
             return list.__repr__(self)
         return _masked_repr(self)
 
     def copy(self):
-        return MaskedList(list.__iter__(self), _mask_repr=self._mask_repr)
+        return MaskedList(list.__iter__(self))
 
     def __copy__(self):
         return self.copy()
 
     def __deepcopy__(self, memo):
-        return MaskedList(
-            (copy.deepcopy(v, memo) for v in list.__iter__(self)),
-            _mask_repr=self._mask_repr,
-        )
+        return MaskedList(copy.deepcopy(v, memo) for v in list.__iter__(self))
 
 
 # ---------------------------------------------------------------------------
@@ -232,16 +225,14 @@ class MaskedList(list):
 # ---------------------------------------------------------------------------
 
 
-def hide(value, *, mask_repr=None):
+def hide(value):
     """Wrap a pillar dict/list in MaskedDict/MaskedList for display masking.
 
     Scalar values (str, int, bool, None …) are returned unchanged — they are
     stored plain inside the container and only redacted in the container's repr.
-    ``mask_repr`` controls repr/str masking independently of the output safety
-    net. If omitted, new containers mask by default and already-wrapped values
-    are returned as-is. An explicit different setting creates a new wrapper.
+    Already-wrapped values are returned as-is (idempotent).
     """
-    return _mask_wrap(value, mask_repr)
+    return _mask_wrap(value)
 
 
 def expose(value, _seen=None):

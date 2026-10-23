@@ -1421,6 +1421,13 @@ def test_compile_pillar_disk_cache(master_opts, grains):
         store_mock.assert_has_calls(expected_stores, any_order=False)
 
 
+@pytest.fixture
+def restore_repr_masking():
+    yield
+    salt.utils.secret.set_repr_masking(True)
+
+
+@pytest.mark.usefixtures("restore_repr_masking")
 @pytest.mark.parametrize("flag", [True, False])
 def test_remote_pillar_preserves_wrapping_and_controls_repr(grains, tmp_pki, flag):
     opts = salt.config.minion_config(None)
@@ -1450,6 +1457,7 @@ def test_remote_pillar_preserves_wrapping_and_controls_repr(grains, tmp_pki, fla
     assert salt.utils.secret.mask_output(ret) == {"password": "**********"}
 
 
+@pytest.mark.usefixtures("restore_repr_masking")
 @pytest.mark.parametrize("flag", [True, False])
 async def test_async_remote_pillar_preserves_wrapping_and_controls_repr(grains, flag):
     opts = salt.config.minion_config(None)

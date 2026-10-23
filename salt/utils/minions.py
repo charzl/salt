@@ -129,15 +129,16 @@ def get_minion_data(minion, opts):
     pillar = None
     if opts.get("minion_data_cache", False):
         cache = salt.cache.factory(opts)
+        pillar_cache = salt.cache.pillar_factory(opts)
         if minion is None:
             for id_ in cache.list("grains"):
                 grains = cache.fetch("grains", id_)
-                pillar = cache.fetch("pillar", id_)
+                pillar = pillar_cache.fetch("pillar", id_)
                 if grains:
                     break
         else:
             grains = cache.fetch("grains", minion)
-            pillar = cache.fetch("pillar", minion)
+            pillar = pillar_cache.fetch("pillar", minion)
     return minion if minion else None, grains, pillar
 
 
@@ -612,6 +613,11 @@ class CkMinions:
             return {"minions": [], "missing": []}
 
         if cache_enabled:
+            cache = (
+                salt.cache.pillar_factory(self.opts)
+                if search_type == "pillar"
+                else self.cache
+            )
             if greedy:
                 cminions = list_cached_minions()
             else:
@@ -628,7 +634,7 @@ class CkMinions:
                 if id_ not in minions:
                     continue
                 evaluated.add(id_)
-                mdata = self.cache.fetch(search_type, id_)
+                mdata = cache.fetch(search_type, id_)
                 if mdata is None:
                     minions.discard(id_)
                     continue

@@ -6,6 +6,7 @@ import collections
 import copy
 import datetime
 import fnmatch
+import hashlib
 import logging
 import sys
 import time
@@ -17,6 +18,7 @@ import salt.channel.client
 import salt.fileclient
 import salt.loader
 import salt.minion
+import salt.payload
 import salt.utils.args
 import salt.utils.crypt
 import salt.utils.data
@@ -63,8 +65,8 @@ def get_pillar(
         file_client = "remote"
 
     ptype = {"remote": RemotePillar, "local": Pillar}.get(file_client, Pillar)
-    # If local pillar and we're caching, run through the cache system first
-    if opts.get("pillar_cache") or opts.get("minion_data_cache"):
+    # Minion data snapshots are written by the master request handler.
+    if opts.get("pillar_cache"):
         log.debug("get_pillar using pillar cache with ext: %s", ext)
         return PillarCache(
             opts,
@@ -1449,17 +1451,7 @@ class AsyncPillar(Pillar):
 
 class PillarCache(Pillar):
     """
-    Return a cached pillar if it exists, otherwise cache it.
-
-    Pillar caches are structed in two diminensions: minion_id with a dict of
-    saltenvs. Each saltenv contains a pillar dict
-
-    Example data structure:
-
-    ```
-    {'minion_1':
-        {'base': {'pilar_key_1' 'pillar_val_1'}
-    }
+    Keep one compiled pillar per minion, with its environment stored separately.
     """
 
     def __init__(
@@ -1469,33 +1461,39 @@ class PillarCache(Pillar):
         pillar_override=None,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, pillar_override=None, **kwargs)
         self.clean_cache = clean_cache
-        self.pillar_override = pillar_override or {}
-        self.cache = salt.cache.factory(
-            self.opts,
-            driver=self.opts["pillar.cache_driver"],
-            expires=self.opts["pillar_cache_ttl"],
-        )
+        self._pillar_override = pillar_override or {}
+        # Targeting reads this same backend's pillar/<minion_id> entry.
+        self.cache = salt.cache.pillar_factory(self.opts)
 
     @property
     def pillar_key(self):
-        if not self.opts["pillarenv"]:
-            return self.minion_id
-        else:
-            return f"{self.minion_id}:{self.opts['pillarenv']}"
+        return self.minion_id
 
     def cached_pillar(self):
         """
         Return the cached pillar if it exists, or None
         """
-        return self.cache.fetch("pillar", self.pillar_key)
+        status = self.cache.fetch("pillar_cache_status", self.pillar_key)
+        if not status or status.get("pillarenv") != self.opts["pillarenv"]:
+            return {}
+        pillar_data = self.cache.fetch("pillar", self.pillar_key)
+        # The two cache records are not written atomically. A concurrent
+        # request for another environment can replace the Pillar between
+        # writes, so check that the status still describes this value.
+        if (
+            status.get("digest")
+            != hashlib.sha256(salt.payload.dumps(pillar_data)).hexdigest()
+        ):
+            return {}
+        return pillar_data
 
     def clear_pillar(self):
         """
         Clear the pillar cache, if it exists
         """
-        return self.cache.flush("pillar", self.pillar_key)
+        return self.cache.flush("pillar_cache_status", self.pillar_key)
 
     def compile_pillar(self, *args, **kwargs):  # Will likely just be pillar_dirs
         # matching to consume the same dataset
@@ -1507,12 +1505,7 @@ class PillarCache(Pillar):
             self.opts["pillarenv"],
         )
 
-        # if MDC is on, but not pillar cache, we never read the cache, only write to it
-        if self.opts["minion_data_cache"] and not self.opts["pillar_cache"]:
-            pillar_data = {}
-        else:
-            # Check the cache!
-            pillar_data = self.cached_pillar()
+        pillar_data = self.cached_pillar()
 
         if pillar_data:
             log.debug(
@@ -1521,21 +1514,31 @@ class PillarCache(Pillar):
                 self.opts["pillarenv"],
             )
         else:
-            # We found the minion but not the env. Store it.
+            # The latest entry belongs to another environment or has expired.
             log.debug(
                 "Pillar cache miss for pillarenv %s for minion %s",
                 self.opts["pillarenv"],
                 self.minion_id,
             )
             pillar_data = super().compile_pillar(*args, **kwargs)
-
             self.cache.store("pillar", self.pillar_key, pillar_data)
+            self.cache.store(
+                "pillar_cache_status",
+                self.pillar_key,
+                {
+                    "pillarenv": self.opts["pillarenv"],
+                    "digest": hashlib.sha256(
+                        salt.payload.dumps(pillar_data)
+                    ).hexdigest(),
+                },
+                expires=self.opts["pillar_cache_ttl"],
+            )
 
         # we dont want the pillar_override baked into the cached compile_pillar from above
-        if self.pillar_override:
+        if self._pillar_override:
             pillar_data = salt.utils.dictupdate.merge(
                 pillar_data,
-                self.pillar_override,
+                self._pillar_override,
                 self.merge_strategy,
                 self.opts.get("renderer", "yaml"),
                 self.opts.get("pillar_merge_lists", False),

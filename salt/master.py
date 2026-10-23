@@ -3008,6 +3008,15 @@ class AESFuncs(TransportMethods):
                 load["id"],
                 load["grains"],
             )
+            pillar_cache = salt.cache.pillar_factory(self.opts)
+            # Async compilation does not use PillarCache. Its result supersedes
+            # any reusable compilation stored for this minion.
+            await loop.run_in_executor(
+                None, pillar_cache.flush, "pillar_cache_status", load["id"]
+            )
+            await loop.run_in_executor(
+                None, pillar_cache.store, "pillar", load["id"], data
+            )
 
             if self.opts.get("minion_data_cache_events") is True:
                 await self.event.fire_event_async(
@@ -3683,6 +3692,10 @@ class AESFuncs(TransportMethods):
         self.fs_.update_opts()
         if self.opts.get("minion_data_cache", False):
             self.masterapi.cache.store("grains", load["id"], load["grains"])
+            pillar_cache = salt.cache.pillar_factory(self.opts)
+            if load.get("pillar_override") or not self.opts.get("pillar_cache"):
+                pillar_cache.flush("pillar_cache_status", load["id"])
+            pillar_cache.store("pillar", load["id"], data)
 
             if self.opts.get("minion_data_cache_events") is True:
                 self.event.fire_event(

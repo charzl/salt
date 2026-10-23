@@ -2,15 +2,15 @@
 unit tests for the pillar runner
 """
 
+import hashlib
 import logging
-import os
 import shutil
 
 import pytest
 
+import salt.cache
+import salt.payload
 import salt.runners.pillar as pillar_runner
-import salt.utils.files
-import salt.utils.msgpack
 from tests.support.mock import MagicMock, mock_open, patch
 
 log = logging.getLogger(__name__)
@@ -50,36 +50,32 @@ def pillar_cache_dir(cachedir_tree):
 
 
 @pytest.fixture(scope="function")
-def pillar_cache_files(pillar_cache_dir):
-    MINION_ID = "test-host"
-    pillar = {
-        "this": "one",
-        "that": "two",
-        "those": ["three", "four", "five"],
+def pillar_cache_files(pillar_cache_dir, cachedir_tree):
+    cache = salt.cache.pillar_factory(
+        {**pillar_runner.__opts__, "cachedir": str(cachedir_tree)}
+    )
+    pillars = {
+        "test-host": {
+            "this": "one",
+            "that": "two",
+            "those": ["three", "four", "five"],
+        },
+        "another-host": {
+            "this": "six",
+            "that": "seven",
+            "those": ["eight", "nine", "ten"],
+        },
     }
-    packer = salt.utils.msgpack.Packer()
-    cache_contents = packer.pack(pillar)
-    cache_file = os.path.join(str(pillar_cache_dir), f"{MINION_ID}.p")
-
-    with salt.utils.files.fopen(cache_file, "wb+") as fp:
-        fp.write(cache_contents)
-    mtime = 1612302460.146923
-    os.utime(cache_file, (mtime, mtime))
-
-    MINION_ID = "another-host"
-    cache = {
-        "this": "six",
-        "that": "seven",
-        "those": ["eight", "nine", "ten"],
-    }
-    packer = salt.utils.msgpack.Packer()
-    cache_contents = packer.pack(cache)
-
-    cache_file = os.path.join(str(pillar_cache_dir), f"{MINION_ID}.p")
-    with salt.utils.files.fopen(cache_file, "wb+") as fp:
-        fp.write(cache_contents)
-    mtime = 1612302460.146923
-    os.utime(cache_file, (mtime, mtime))
+    for minion_id, pillar in pillars.items():
+        cache.store("pillar", minion_id, pillar)
+        cache.store(
+            "pillar_cache_status",
+            minion_id,
+            {
+                "pillarenv": None,
+                "digest": hashlib.sha256(salt.payload.dumps(pillar)).hexdigest(),
+            },
+        )
 
 
 def test_clear_pillar_cache(cachedir_tree, pillar_cache_dir, pillar_cache_files):

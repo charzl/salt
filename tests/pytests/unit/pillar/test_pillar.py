@@ -240,7 +240,7 @@ def test_pillar_fetch_pillar_override_skipped(temp_salt_minion, caplog):
         fresh_pillar = pillar.compile_pillar()
         assert "inline_pillar" in fresh_pillar
 
-        pillar_cache = pillar.cache.fetch("pillar", f"{temp_salt_minion.id}:base")
+        pillar_cache = pillar.cache.fetch("pillar", temp_salt_minion.id)
         assert "inline_pillar" not in pillar_cache
 
 

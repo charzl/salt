@@ -104,10 +104,10 @@ def _resource_ids_from_minion_pillar_cache(opts, minion_id):
     if not opts.get("minion_data_cache"):
         return []
     try:
-        cache = salt.cache.factory(opts)
-        if not cache.contains("pillar", minion_id):
+        pillar_cache = salt.cache.pillar_factory(opts)
+        if not pillar_cache.contains("pillar", minion_id):
             return []
-        pillar = cache.fetch("pillar", minion_id) or {}
+        pillar = pillar_cache.fetch("pillar", minion_id) or {}
     except Exception as exc:  # pylint: disable=broad-except
         log.debug(
             "Pillar cache read for minion %s failed while expanding missing returns: %s",

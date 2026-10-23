@@ -844,10 +844,16 @@ class RemoteFuncs:
             load.get("ext"),
             self.mminion.functions,
             pillar_override=load.get("pillar_override", {}),
+            pillarenv=load.get("pillarenv"),
+            clean_cache=load.get("clean_cache"),
         )
         data = pillar.compile_pillar()
         if self.opts.get("minion_data_cache", False):
             self.cache.store("grains", load["id"], load["grains"])
+            pillar_cache = salt.cache.pillar_factory(self.opts)
+            if load.get("pillar_override") or not self.opts.get("pillar_cache"):
+                pillar_cache.flush("pillar_cache_status", load["id"])
+            pillar_cache.store("pillar", load["id"], data)
             if self.opts.get("minion_data_cache_events") is True:
                 self.event.fire_event(
                     {"comment": "Minion data cache refresh"},

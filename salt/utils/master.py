@@ -258,11 +258,13 @@ class MasterPillarUtil:
             return grains, pillars
         if not minion_ids:
             minion_ids = self.cache.list("grains")
+        pillar_cache = salt.cache.pillar_factory(self.opts)
         for minion_id in minion_ids:
             if not salt.utils.verify.valid_id(self.opts, minion_id):
                 continue
             for bank in ["grains", "pillar"]:
-                mdata = self.cache.fetch(bank, minion_id)
+                cache = pillar_cache if bank == "pillar" else self.cache
+                mdata = cache.fetch(bank, minion_id)
                 if not isinstance(mdata, dict):
                     log.warning(
                         "cache.fetch should always return a dict. ReturnedType: %s,"
@@ -564,7 +566,9 @@ class MasterPillarUtil:
                 minion_grains = grains.pop(minion_id, False)
 
                 if clear_pillar:
-                    self.cache.flush("pillar", minion_id)
+                    pillar_cache = salt.cache.pillar_factory(self.opts)
+                    pillar_cache.flush("pillar", minion_id)
+                    pillar_cache.flush("pillar_cache_status", minion_id)
 
                 if clear_grains:
                     self.cache.flush("grains", minion_id)

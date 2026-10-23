@@ -19,7 +19,7 @@ import salt.exceptions
 import salt.fileclient
 import salt.utils.stringutils
 from salt.utils.files import fopen
-from tests.support.mock import ANY, MagicMock, call, patch
+from tests.support.mock import MagicMock, patch
 from tests.support.runtests import RUNTIME_VARS
 
 log = logging.getLogger(__name__)
@@ -1342,34 +1342,40 @@ def test_compile_pillar_cache(master_opts):
     with patch(
         "salt.pillar.Pillar.compile_pillar",
         side_effect=[{"foo": "bar"}, {"foo": "baz"}],
-    ):
+    ) as compile_:
         # Run once for pillarenv base
         pillar.compile_pillar()
-        expected_cache = {("pillar", "mocked_minion:base"): [ANY, None, {"foo": "bar"}]}
-        assert pillar.cache.storage == expected_cache
+        assert pillar.cache.fetch("pillar", "mocked_minion") == {"foo": "bar"}
+        status = pillar.cache.fetch("pillar_cache_status", "mocked_minion")
+        assert status["pillarenv"] == "base"
 
         # Run a second time for pillarenv base
         pillar.compile_pillar()
-        assert pillar.cache.storage == expected_cache
+        assert compile_.call_count == 1
 
         # Change the pillarenv
         pillar.opts["pillarenv"] = "dev"
 
         # Run once for pillarenv dev
         pillar.compile_pillar()
-        expected_cache = {
-            ("pillar", "mocked_minion:base"): [ANY, None, {"foo": "bar"}],
-            ("pillar", "mocked_minion:dev"): [ANY, None, {"foo": "baz"}],
-        }
-        assert pillar.cache.storage == expected_cache
+        assert pillar.cache.fetch("pillar", "mocked_minion") == {"foo": "baz"}
+        status = pillar.cache.fetch("pillar_cache_status", "mocked_minion")
+        assert status["pillarenv"] == "dev"
 
         # Run a second time for pillarenv dev
         pillar.compile_pillar()
-        assert pillar.cache.storage == expected_cache
+        assert compile_.call_count == 2
 
 
-def test_compile_pillar_disk_cache(master_opts, grains):
-    master_opts.update({"pillar_cache_ttl": 3600, "pillar_cache": True})
+def test_compile_pillar_disk_cache(master_opts, grains, tmp_path):
+    master_opts.update(
+        {
+            "pillar_cache_ttl": 3600,
+            "pillar_cache": True,
+            "memcache_expire_seconds": 0,
+            "cachedir": str(tmp_path),
+        }
+    )
 
     pillar = salt.pillar.PillarCache(
         master_opts,
@@ -1381,11 +1387,7 @@ def test_compile_pillar_disk_cache(master_opts, grains):
     with patch(
         "salt.pillar.Pillar.compile_pillar",
         side_effect=[{"foo": "bar"}, {"foo": "baz"}],
-    ), patch.object(
-        pillar.cache, "fetch", side_effect=[None, {"foo": "bar"}, None, {"foo": "baz"}]
-    ) as fetch_mock, patch.object(
-        pillar.cache, "store"
-    ) as store_mock:
+    ) as compile_:
         # Run once for pillarenv base
         pillar.compile_pillar()
 
@@ -1401,23 +1403,9 @@ def test_compile_pillar_disk_cache(master_opts, grains):
         # Run a second time for pillarenv dev
         pillar.compile_pillar()
 
-        expected_fetches = [
-            call("pillar", "mocked_minion:base"),
-            call("pillar", "mocked_minion:base"),
-            call("pillar", "mocked_minion:dev"),
-            call("pillar", "mocked_minion:dev"),
-        ]
-
-        # Assert all calls match the pattern
-        fetch_mock.assert_has_calls(expected_fetches, any_order=False)
-
-        expected_stores = [
-            call("pillar", "mocked_minion:base", {"foo": "bar"}),
-            call("pillar", "mocked_minion:dev", {"foo": "baz"}),
-        ]
-
-        # Assert all calls match the pattern
-        store_mock.assert_has_calls(expected_stores, any_order=False)
+        assert compile_.call_count == 2
+        assert pillar.cache.list("pillar") == ["mocked_minion"]
+        assert pillar.cache.fetch("pillar", "mocked_minion") == {"foo": "baz"}
 
 
 def test_remote_pillar_bad_return(grains, tmp_pki):

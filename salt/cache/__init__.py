@@ -32,6 +32,11 @@ def factory(opts, **kwargs):
     return cls(opts, **kwargs)
 
 
+def pillar_factory(opts):
+    """Use the same backend for compiled Pillar and its targeting snapshot."""
+    return factory(opts, driver=opts.get("pillar.cache_driver"))
+
+
 class Cache:
     """
     Base caching object providing access to the modular cache subsystem.

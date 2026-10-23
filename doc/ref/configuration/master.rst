@@ -5255,8 +5255,26 @@ configuration options to fully understand the tunable parameters and their impli
 
 .. note::
 
-    Setting ``pillar_cache: True`` has no effect on
-    :ref:`targeting minions with pillar <targeting-pillar>`.
+    The latest compiled Pillar for each minion is stored under its plain minion
+    ID in the ``pillar`` cache bank. With ``minion_data_cache`` enabled,
+    :ref:`targeting minions with pillar <targeting-pillar>` reads this entry,
+    including for minions with a ``pillarenv``. The ``pillar_cache_status`` bank
+    records which environment produced it; a request for another environment
+    recompiles and replaces the previous result. Only the latest environment
+    remains cached for each minion. A direct master-side compilation can also
+    replace this value, even when it does not update the minion's in-memory
+    Pillar.
+
+    ``pillar_cache_ttl`` expires the compilation status, not the Pillar value
+    used for targeting. A successful minion Pillar request refreshes the
+    targeting value, including when compilation was served from cache.
+    ``pillar.cache_driver`` applies to both banks and Pillar targeting reads.
+    ``pillar.clear_pillar_cache`` clears only the compilation status, so the
+    last Pillar value remains available for targeting; ``cache.clear_pillar``
+    clears both.
+
+    Existing environment-specific cache entries are ignored and rebuilt on
+    first use after upgrading.
 
 .. conf_master:: pillar_cache_ttl
 

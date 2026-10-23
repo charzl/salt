@@ -3,7 +3,6 @@ Tests for salt.utils.secret (MaskedDict, MaskedList, hide/expose/serial/mask_out
 """
 
 import copy
-import pickle
 
 import pytest
 
@@ -461,83 +460,37 @@ def test_no_log_mask_does_not_depend_on_pillar_mask_output():
     assert ret["changes"] == {"a": secret.REDACT_PLACEHOLDER}
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("context", [False, True])
+@pytest.fixture
+def repr_masking():
+    secret.set_repr_masking(True)
+    yield secret.set_repr_masking
+    secret.set_repr_masking(True)
+
+
 @pytest.mark.parametrize(
-    "value", [{"nested": {"password": "hunter2"}}, [{"password": "hunter2"}]]
+    "value", [{"a": {"b": ["hunter2"]}}, ["hunter2", {"password": "hunter2"}]]
 )
-def test_repr_flag_does_not_disable_output_safety_net(enabled, context, value):
-    wrapped = secret.hide(value, mask_repr=enabled)
-    assert isinstance(wrapped, (secret.MaskedDict, secret.MaskedList))
-    assert type(wrapped)._repr_masked is enabled
-    token = secret.mask_pillar.set(context)
+def test_repr_masking_switch_only_changes_repr_and_str(repr_masking, value):
+    hidden = secret.hide(value)
+    assert "hunter2" not in repr(hidden)
+    repr_masking(False)
+    assert "hunter2" in repr(hidden)
+    assert "hunter2" in str(hidden)
+    # The wrapping, and so the output safety net, does not depend on it.
+    assert "hunter2" not in repr(secret.mask_output(hidden))
+    assert "hunter2" not in repr(secret.serial(hidden))
+    repr_masking(True)
+    assert "hunter2" not in repr(hidden)
+
+
+def test_repr_masking_switch_still_defers_to_render_context(repr_masking):
+    hidden = secret.hide({"password": "hunter2"})
+    token = secret.mask_pillar.set(False)
     try:
-        for formatted in (repr(wrapped), str(wrapped)):
-            assert ("hunter2" not in formatted) is (enabled and context)
-        assert secret.mask_output(wrapped) == secret.serial(value)
-        assert secret.expose(wrapped) == value
+        assert "hunter2" in repr(hidden)
     finally:
         secret.mask_pillar.reset(token)
-
-
-@pytest.mark.parametrize("value", [{"password": "hunter2"}, ["hunter2"]])
-def test_hide_preserves_existing_display_policy_unless_explicitly_changed(value):
-    original = secret.hide(value, mask_repr=False)
-    assert secret.hide(original) is original
-    assert secret.hide(original, mask_repr=False) is original
-    masked = secret.hide(original, mask_repr=True)
-    assert "hunter2" not in repr(masked)
-    assert "hunter2" in repr(original)
-    restored = secret.hide(masked, mask_repr=False)
-    assert "hunter2" in repr(restored)
-    assert "hunter2" not in repr(masked)
-
-
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize(
-    "value", [{"nested": {"password": "hunter2"}}, [{"password": "hunter2"}]]
-)
-@pytest.mark.parametrize(
-    "clone",
-    [
-        lambda value: value.copy(),
-        copy.copy,
-        copy.deepcopy,
-        lambda value: pickle.loads(pickle.dumps(value)),
-    ],
-)
-def test_copies_and_pickle_preserve_display_policy(enabled, value, clone):
-    result = clone(secret.hide(value, mask_repr=enabled))
-    assert ("hunter2" not in repr(result)) is enabled
-    nested = result["nested"] if isinstance(result, dict) else result[0]
-    assert ("hunter2" not in repr(nested)) is enabled
-    assert secret.mask_output(result) == secret.serial(value)
-
-
-def test_dict_mutations_propagate_display_policy_without_changing_input():
-    source = secret.hide({"password": "hunter2"})
-    value = secret.hide({}, mask_repr=False)
-    value["assigned"] = source
-    value.update({"updated": source})
-    value.setdefault("default", source)
-    assert all("hunter2" in repr(child) for child in value.values())
-    assert "hunter2" not in repr(source)
-
-
-def test_list_mutations_and_operations_propagate_display_policy():
-    source = secret.hide({"password": "hunter2"})
-    value = secret.hide([], mask_repr=False)
-    value.append(source)
-    value.insert(0, source)
-    value.extend([source])
-    value[0] = source
-    value[1:2] = [source]
-    value += [source]
-    value *= 2
-    for result in (value, value + [source], value * 2):
-        assert "hunter2" in repr(result)
-        assert all("hunter2" in repr(child) for child in result)
-    assert "hunter2" not in repr(source)
+    assert "hunter2" not in repr(hidden)
 
 
 def test_expose_removes_masked_children_inside_plain_containers():

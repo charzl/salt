@@ -148,11 +148,6 @@ class RemotePillarMixin:
     Common remote pillar functionality
     """
 
-    def _hide(self, ret_pillar):
-        return salt.utils.secret.hide(
-            ret_pillar, mask_repr=self.opts.get("pillar_mask_output", False)
-        )
-
     def get_ext_pillar_extra_minion_data(self, opts):
         """
         Returns the extra data from the minion's opts dict (the config file).
@@ -195,6 +190,12 @@ class RemotePillarMixin:
                 )
         log.trace("ext_pillar_extra_data = %s", extra_data)
         return extra_data
+
+    def _hide(self, ret_pillar):
+        # The wrapping is what the output safety net relies on, so it always
+        # applies. The flag only decides whether repr() and str() redact.
+        salt.utils.secret.set_repr_masking(self.opts.get("pillar_mask_output", False))
+        return salt.utils.secret.hide(ret_pillar)
 
     def validate_return(self, data):
         if not isinstance(data, dict):

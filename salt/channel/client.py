@@ -23,6 +23,7 @@ import salt.utils.files
 import salt.utils.stringutils
 import salt.utils.tracing
 import salt.utils.verify
+from salt.utils.asyncbridge import BridgedWrapper
 from salt.utils.asynchronous import SyncWrapper, aioloop
 
 log = logging.getLogger(__name__)
@@ -40,6 +41,19 @@ class ReqChannel:
     @staticmethod
     def factory(opts, **kwargs):
         return SyncWrapper(
+            AsyncReqChannel.factory,
+            (opts,),
+            kwargs,
+            loop_kwarg="io_loop",
+        )
+
+    @staticmethod
+    def shared_loop_factory(opts, **kwargs):
+        """
+        Same as ``factory``, but the channel runs on the process-wide loop from
+        ``salt.utils.asyncbridge`` instead of a loop of its own.
+        """
+        return BridgedWrapper(
             AsyncReqChannel.factory,
             (opts,),
             kwargs,

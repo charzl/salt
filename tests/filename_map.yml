@@ -63,6 +63,9 @@ salt/crypt.py:
   - pytests.unit.test_crypt
   - pytests.functional.test_crypt
 
+salt/transport/ws\.py:
+  - pytests.functional.transport.ws.test_publish_server
+
 salt/modules/cp.py:
   - pytests.functional.modules.file.test_replace
   - pytests.unit.modules.file.test_file_basics

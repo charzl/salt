@@ -126,6 +126,9 @@ salt/cli/*:
 salt/cli/batch_async.py:
   - pytests.unit.cli.test_batch_async
 
+salt/transport/(ws|base)\.py:
+  - pytests.functional.transport.ws.test_publish_client
+
 salt/cli/call.py:
   - pytests.integration.cli.test_salt_call
 

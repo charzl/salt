@@ -378,6 +378,11 @@ salt/utils/vt.py:
 salt/transport/ws.py:
   - pytests.functional.transport.ws.test_request_client
 
+salt/(utils/event|transport/tcp)\.py:
+  - pytests.unit.utils.event.test_async_session
+  - pytests.functional.utils.test_async_event
+  - pytests.unit.test_minion
+
 salt/wheel/*:
   - pytests.integration.wheel.test_client
 

@@ -1,0 +1,69 @@
+name: Notify Google Chat
+
+# Posts a message to a Google Chat space when one of the workflows listed
+# below ends with "failure" or "timed_out" (not "cancelled").
+#
+# - To get notified about another workflow, add its `name:` to the list.
+# - The incoming webhook URL is the repository secret
+#   GOOGLE_CHAT_WEBHOOK_URL.  Without it the job does nothing, so forks
+#   that did not set it are not affected.
+# - `workflow_run` only starts workflows from the default branch, so this
+#   file has to be on the default branch to have any effect.
+# - "Run workflow" (workflow_dispatch) sends a test message, to check the
+#   secret and the Chat space without needing a failing run.
+
+on:
+  workflow_dispatch: {}
+  workflow_run:
+    workflows:
+      - Nightly Stress Test
+    types:
+      - completed
+
+permissions:
+  actions: read  # list the failed jobs and steps of the run
+
+jobs:
+  notify:
+    name: Notify on failure
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(fromJSON('["failure", "timed_out"]'), github.event.workflow_run.conclusion)
+    runs-on: ubuntu-latest
+    env:
+      GOOGLE_CHAT_WEBHOOK_URL: ${{ secrets.GOOGLE_CHAT_WEBHOOK_URL }}
+    steps:
+      - name: Post to Google Chat
+        if: env.GOOGLE_CHAT_WEBHOOK_URL != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # The fallbacks (after ||) are for the manual test run, where
+          # there is no workflow_run event.
+          RUN_ID: ${{ github.event.workflow_run.id || github.run_id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url || format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
+          WORKFLOW: ${{ github.event.workflow_run.name || 'Notify Google Chat (test message)' }}
+          BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+          EVENT: ${{ github.event.workflow_run.event || github.event_name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion || 'test' }}
+        run: |
+          # Branch and job names are not trusted text: drop the characters
+          # Google Chat reads as links and mentions.
+          clean() { tr -d '<>`*_~' ; }
+
+          # "<job>: <failed step>, <failed step>" for each failed job.
+          # The message is still useful without it, so ignore API errors.
+          failed=$(gh api --paginate "repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
+            --jq '.jobs[] | select(.conclusion == "failure") | .name + ": " + ([.steps[] | select(.conclusion == "failure") | .name] | join(", "))' \
+            | head -n 5 | clean) || failed=""
+
+          text="🔴 *$(printf '%s' "${WORKFLOW}" | clean)* ${CONCLUSION} on \`$(printf '%s' "${BRANCH}" | clean)\` (${EVENT})"
+          if [ -n "${failed}" ]; then
+            text="${text}"$'\n'"${failed}"
+          fi
+          text="${text}"$'\n'"<${RUN_URL}|Open run>"
+
+          jq -n --arg text "${text}" '{text: $text}' \
+            | curl --fail --silent --show-error --max-time 30 \
+                --header 'Content-Type: application/json; charset=UTF-8' \
+                --data @- "${GOOGLE_CHAT_WEBHOOK_URL}"

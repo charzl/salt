@@ -53,11 +53,19 @@ jobs:
 
           # "<job> (<failed step>, ...)" for each failed job, comma separated.
           # The message is still useful without it, so ignore API errors.
+          # No pipe into clean(): a pipeline's exit status is that of its last
+          # command, so a failed gh call would not reach the || fallback.
           jobs=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs?per_page=100" \
             --jq '[.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | .name + (([.steps[] | select(.conclusion == "failure" or .conclusion == "timed_out") | .name] | join(", ")) as $s | if $s == "" then "" else " (" + $s + ")" end)] | join(", ")' \
-            | clean) || jobs=""
+            2>/dev/null) || jobs=""
+          jobs=$(printf '%s' "${jobs}" | clean)
 
           name=$(printf '%s' "${WORKFLOW}" | clean)
+          # Friendly name for the nightlies repo; any other repo shows owner/name.
+          case "${REPO}" in
+            saltstack/salt-nightlies) repo_name="Salt Nightly" ;;
+            *) repo_name="${REPO}" ;;
+          esac
           if [ "${CONCLUSION}" = "test" ]; then
             text="🧪 ${name} 🧪"
           else
@@ -66,6 +74,7 @@ jobs:
               text="${text}"$'\n'"❌ Jobs needing attention: ${jobs}"
             fi
           fi
+          text="${text}"$'\n'"📦 Repo: ${repo_name}"
           text="${text}"$'\n'"🌿 Branch: $(printf '%s' "${BRANCH}" | clean)"
           text="${text}"$'\n'"🔗 <${RUN_URL}|View run>"
 

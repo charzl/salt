@@ -42,26 +42,32 @@ jobs:
           # there is no workflow_run event.
           RUN_ID: ${{ github.event.workflow_run.id || github.run_id }}
           RUN_URL: ${{ github.event.workflow_run.html_url || format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
-          WORKFLOW: ${{ github.event.workflow_run.name || 'Notify Google Chat (test message)' }}
+          WORKFLOW: ${{ github.event.workflow_run.name || 'Notify Google Chat test message' }}
           BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
           EVENT: ${{ github.event.workflow_run.event || github.event_name }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion || 'test' }}
         run: |
           # Branch and job names are not trusted text: drop the characters
           # Google Chat reads as links and mentions.
-          clean() { tr -d '<>`*_~' ; }
+          clean() { tr -d '<>`*~' ; }
 
-          # "<job>: <failed step>, <failed step>" for each failed job.
+          # "<job> (<failed step>, ...)" for each failed job, comma separated.
           # The message is still useful without it, so ignore API errors.
-          failed=$(gh api --paginate "repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
-            --jq '.jobs[] | select(.conclusion == "failure") | .name + ": " + ([.steps[] | select(.conclusion == "failure") | .name] | join(", "))' \
-            | head -n 5 | clean) || failed=""
+          jobs=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+            --jq '[.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | .name + (([.steps[] | select(.conclusion == "failure" or .conclusion == "timed_out") | .name] | join(", ")) as $s | if $s == "" then "" else " (" + $s + ")" end)] | join(", ")' \
+            | clean) || jobs=""
 
-          text="🔴 *$(printf '%s' "${WORKFLOW}" | clean)* ${CONCLUSION} on \`$(printf '%s' "${BRANCH}" | clean)\` (${EVENT})"
-          if [ -n "${failed}" ]; then
-            text="${text}"$'\n'"${failed}"
+          name=$(printf '%s' "${WORKFLOW}" | clean)
+          if [ "${CONCLUSION}" = "test" ]; then
+            text="🧪 ${name} 🧪"
+          else
+            text="🚨 ${name} needs attention 🚨"
+            if [ -n "${jobs}" ]; then
+              text="${text}"$'\n'"❌ Jobs needing attention: ${jobs}"
+            fi
           fi
-          text="${text}"$'\n'"<${RUN_URL}|Open run>"
+          text="${text}"$'\n'"🌿 Branch: $(printf '%s' "${BRANCH}" | clean)"
+          text="${text}"$'\n'"🔗 <${RUN_URL}|View run>"
 
           jq -n --arg text "${text}" '{text: $text}' \
             | curl --fail --silent --show-error --max-time 30 \

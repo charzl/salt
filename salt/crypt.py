@@ -23,7 +23,6 @@ import traceback
 import uuid
 import weakref
 
-import tornado.concurrent
 import tornado.ioloop
 
 import salt.cache
@@ -1040,6 +1039,9 @@ class AsyncAuth:
     # mapping of key -> creds
     creds_map = {}
 
+    # ``SAuth`` does not run ``__singleton_init__``, so give it a default.
+    _authenticated = False
+
     _atfork_registered = False
 
     @classmethod
@@ -1120,6 +1122,14 @@ class AsyncAuth:
         # later raises ``AttributeError`` on ``self._creds["aes"]`` (see
         # issue #67947).
         self._creds = None
+        # ``_authenticated`` is True while the cached credentials are good.
+        # ``_authenticate_gen`` counts successful sign-ins so a caller that
+        # waited for ``_authenticate_lock`` can tell that another caller
+        # signed in meanwhile. The lock is created on first use, inside the
+        # running loop (see ``authenticate``).
+        self._authenticated = False
+        self._authenticate_gen = 0
+        self._authenticate_lock = None
         if self.opts["__role"] == "syndic":
             self.mpub = "syndic_master.pub"
         else:
@@ -1139,18 +1149,18 @@ class AsyncAuth:
             self._creds = creds
             self._crypticle = Crypticle(self.opts, creds["aes"])
             self._session_crypticle = Crypticle(self.opts, creds["session"])
-            self._authenticate_future = tornado.concurrent.Future()
-            self._authenticate_future.set_result(True)
+            self._authenticated = True
 
     def __deepcopy__(self, memo):
         cls = self.__class__
         result = cls.__new__(cls, copy.deepcopy(self.opts, memo))
         memo[id(self)] = result
         for key in self.__dict__:
-            if key in ("io_loop",):
+            if key in ("io_loop", "_authenticate_lock"):
                 # The io_loop has a thread Lock which will fail to be deep
                 # copied. Skip it because it will just be recreated on the
-                # new copy.
+                # new copy. The same goes for the sign-in lock, which is
+                # created on first use.
                 continue
             setattr(result, key, copy.deepcopy(self.__dict__[key], memo))
         return result
@@ -1169,46 +1179,42 @@ class AsyncAuth:
 
     @property
     def authenticated(self):
-        return (
-            hasattr(self, "_authenticate_future")
-            and self._authenticate_future.done()
-            and self._authenticate_future.exception() is None
-        )
+        return self._authenticated
 
     def invalidate(self):
-        if self.authenticated:
-            del self._authenticate_future
+        if self._authenticated:
+            self._authenticated = False
             key = self.__key(self.opts)
             if key in AsyncAuth.creds_map:
                 del AsyncAuth.creds_map[key]
 
-    def authenticate(self, callback=None):
+    async def authenticate(self, callback=None):
         """
-        Ask for this client to reconnect to the origin
+        Sign in to the master, unless another caller signed in while this one
+        was waiting its turn.
 
-        This function will de-dupe all calls here and return a *single* future
-        for the sign-in-- whis way callers can all assume there aren't others
+        Callers take turns on a lock, so only one sign-in runs at a time. The
+        sign-in runs in the task of the caller that holds the lock. Cancelling
+        a caller therefore only stops its own sign-in: the lock is released
+        and the next caller signs in. A caller that is waiting for the lock
+        and is cancelled just leaves the queue.
+
+        A caller that waited for the lock does not sign in again when another
+        caller signed in meanwhile. It uses the credentials that sign-in
+        stored.
         """
-        # if an auth is in flight-- and not done-- just pass that back as the future to wait on
-        if (
-            hasattr(self, "_authenticate_future")
-            and not self._authenticate_future.done()
-        ):
-            future = self._authenticate_future
-        else:
-            future = tornado.concurrent.Future()
-            self._authenticate_future = future
-            self.io_loop.create_task(self._authenticate())
-
+        if self._authenticate_lock is None:
+            self._authenticate_lock = asyncio.Lock()
+        gen = self._authenticate_gen
+        async with self._authenticate_lock:
+            if self._authenticate_gen == gen:
+                # Callers that check ``authenticated`` first wait for this
+                # sign-in instead of using credentials that may be stale.
+                self._authenticated = False
+                await self._authenticate()
         if callback is not None:
-
-            def handle_future(future):
-                response = future.result()
-                self.io_loop.call_soon(callback, response)
-
-            future.add_done_callback(handle_future)
-
-        return future
+            self.io_loop.call_soon(callback, True)
+        return True
 
     async def _authenticate(self):
         """
@@ -1309,7 +1315,7 @@ class AsyncAuth:
                     error = SaltClientError(
                         "Attempt to authenticate with the salt master failed"
                     )
-                self._authenticate_future.set_exception(error)
+                raise error
             else:
                 key = self.__key(self.opts)
                 new_aes, changed_aes, changed_session = False, False, False
@@ -1332,9 +1338,9 @@ class AsyncAuth:
                     self._crypticle = Crypticle(self.opts, creds["aes"])
                     self._session_crypticle = Crypticle(self.opts, creds["session"])
 
-                self._authenticate_future.set_result(
-                    True
-                )  # mark the sign-in as complete
+                # Mark the sign-in as complete.
+                self._authenticated = True
+                self._authenticate_gen += 1
                 # Notify the bus about creds change.
                 # Fire synchronously on the role's event bus (no io_loop) so the
                 # IPC publish completes before the `with` block tears the event
@@ -1991,7 +1997,9 @@ class SAuth(AsyncAuth):
             self.authenticate()
         return self._crypticle
 
-    def authenticate(self, _=None):  # TODO: remove unused var
+    def authenticate(
+        self, _=None
+    ):  # TODO: remove unused var # pylint: disable=invalid-overridden-method
         """
         Authenticate with the master, this method breaks the functional
         paradigm, it will update the master information from a fresh sign

@@ -6137,11 +6137,6 @@ class Minion(MinionBase):
         if hasattr(self, "schedule"):
             del self.schedule
         if hasattr(self, "pub_channel") and self.pub_channel is not None:
-            # Stop a sign-in that is still retrying. The channels share one
-            # ``AsyncAuth``, so this is done here and not when one closes.
-            auth = getattr(self.pub_channel, "auth", None)
-            if auth is not None and hasattr(auth, "cancel_sign_in"):
-                auth.cancel_sign_in()
             self.pub_channel.on_recv(None)
             self.pub_channel.close()
             self.pub_channel = None

@@ -23,7 +23,6 @@ import traceback
 import uuid
 import weakref
 
-import tornado.concurrent
 import tornado.ioloop
 
 import salt.cache
@@ -1028,6 +1027,28 @@ def _auth_singleton_key(opts):
     )
 
 
+class _SignIn:
+    """
+    One sign-in attempt of an ``AsyncAuth``.
+
+    The task that does the sign-in sets ``event`` when it is over, and sets
+    ``error`` first if it failed. Callers wait for ``event`` and read
+    ``error``. They never wait for ``task`` itself, so cancelling a caller
+    cannot cancel the sign-in.
+    """
+
+    __slots__ = ("task", "event", "error")
+
+    def __init__(self):
+        self.task = None
+        self.event = asyncio.Event()
+        self.error = None
+
+    @property
+    def done(self):
+        return self.event.is_set()
+
+
 class AsyncAuth:
     """
     Set up an Async object to maintain authentication with the salt master
@@ -1039,6 +1060,10 @@ class AsyncAuth:
 
     # mapping of key -> creds
     creds_map = {}
+
+    # ``SAuth`` does not run ``__singleton_init__``, so give it defaults.
+    _authenticated = False
+    _current_sign_in = None
 
     _atfork_registered = False
 
@@ -1120,6 +1145,11 @@ class AsyncAuth:
         # later raises ``AttributeError`` on ``self._creds["aes"]`` (see
         # issue #67947).
         self._creds = None
+        # ``_authenticated`` is True while the cached credentials are good.
+        # ``_current_sign_in`` is the sign-in that callers wait for, see
+        # ``authenticate``.
+        self._authenticated = False
+        self._current_sign_in = None
         if self.opts["__role"] == "syndic":
             self.mpub = "syndic_master.pub"
         else:
@@ -1139,18 +1169,18 @@ class AsyncAuth:
             self._creds = creds
             self._crypticle = Crypticle(self.opts, creds["aes"])
             self._session_crypticle = Crypticle(self.opts, creds["session"])
-            self._authenticate_future = tornado.concurrent.Future()
-            self._authenticate_future.set_result(True)
+            self._authenticated = True
 
     def __deepcopy__(self, memo):
         cls = self.__class__
         result = cls.__new__(cls, copy.deepcopy(self.opts, memo))
         memo[id(self)] = result
         for key in self.__dict__:
-            if key in ("io_loop",):
+            if key in ("io_loop", "_current_sign_in"):
                 # The io_loop has a thread Lock which will fail to be deep
                 # copied. Skip it because it will just be recreated on the
-                # new copy.
+                # new copy. The same goes for the running sign-in, which
+                # holds a task.
                 continue
             setattr(result, key, copy.deepcopy(self.__dict__[key], memo))
         return result
@@ -1169,46 +1199,68 @@ class AsyncAuth:
 
     @property
     def authenticated(self):
-        return (
-            hasattr(self, "_authenticate_future")
-            and self._authenticate_future.done()
-            and self._authenticate_future.exception() is None
-        )
+        return self._authenticated
 
     def invalidate(self):
-        if self.authenticated:
-            del self._authenticate_future
+        if self._authenticated:
+            self._authenticated = False
             key = self.__key(self.opts)
             if key in AsyncAuth.creds_map:
                 del AsyncAuth.creds_map[key]
 
-    def authenticate(self, callback=None):
+    async def authenticate(self, callback=None):
         """
-        Ask for this client to reconnect to the origin
+        Sign in to the master and wait for the sign-in to finish.
 
-        This function will de-dupe all calls here and return a *single* future
-        for the sign-in-- whis way callers can all assume there aren't others
+        Callers that need a sign-in at the same time wait for the same one. A
+        single task does the sign-in, and the callers wait for it to report
+        that it is over. A caller never waits on the task itself, so
+        cancelling a caller (for example a request timeout) only ends that
+        caller's wait. The sign-in keeps running and the other callers still
+        get its result or its error.
         """
-        # if an auth is in flight-- and not done-- just pass that back as the future to wait on
-        if (
-            hasattr(self, "_authenticate_future")
-            and not self._authenticate_future.done()
-        ):
-            future = self._authenticate_future
-        else:
-            future = tornado.concurrent.Future()
-            self._authenticate_future = future
-            self.io_loop.create_task(self._authenticate())
-
+        sign_in = self._current_sign_in
+        if sign_in is None or sign_in.done:
+            # Nothing is running, or the last sign-in is over: start one.
+            # Callers that check ``authenticated`` first wait for it instead
+            # of using credentials that may be stale.
+            self._authenticated = False
+            sign_in = self._current_sign_in = _SignIn()
+            sign_in.task = self.io_loop.create_task(self._run_sign_in(sign_in))
+        await sign_in.event.wait()
+        if sign_in.error is not None:
+            raise sign_in.error
         if callback is not None:
+            self.io_loop.call_soon(callback, True)
+        return True
 
-            def handle_future(future):
-                response = future.result()
-                self.io_loop.call_soon(callback, response)
+    async def _run_sign_in(self, sign_in):
+        """
+        Run one sign-in and tell the callers waiting for it that it is over.
+        """
+        try:
+            await self._authenticate()
+        except Exception as exc:  # pylint: disable=broad-except
+            sign_in.error = exc
+        except BaseException:
+            # The task was cancelled (see ``close``) or the process is
+            # exiting. Callers get an ordinary error: handing them a
+            # CancelledError would cancel them too.
+            sign_in.error = SaltClientError("The sign-in was interrupted")
+            raise
+        finally:
+            sign_in.event.set()
 
-            future.add_done_callback(handle_future)
-
-        return future
+    async def close(self, timeout=5):
+        """
+        Cancel the sign-in that is running, if any, and wait for it to stop.
+        The callers waiting for it get a ``SaltClientError``.
+        """
+        sign_in = self._current_sign_in
+        if sign_in is None or sign_in.done or sign_in.task is None:
+            return
+        sign_in.task.cancel()
+        await asyncio.wait({sign_in.task}, timeout=timeout)
 
     async def _authenticate(self):
         """
@@ -1309,7 +1361,7 @@ class AsyncAuth:
                     error = SaltClientError(
                         "Attempt to authenticate with the salt master failed"
                     )
-                self._authenticate_future.set_exception(error)
+                raise error
             else:
                 key = self.__key(self.opts)
                 new_aes, changed_aes, changed_session = False, False, False
@@ -1332,9 +1384,8 @@ class AsyncAuth:
                     self._crypticle = Crypticle(self.opts, creds["aes"])
                     self._session_crypticle = Crypticle(self.opts, creds["session"])
 
-                self._authenticate_future.set_result(
-                    True
-                )  # mark the sign-in as complete
+                # Mark the sign-in as complete.
+                self._authenticated = True
                 # Notify the bus about creds change.
                 # Fire synchronously on the role's event bus (no io_loop) so the
                 # IPC publish completes before the `with` block tears the event
@@ -1991,7 +2042,9 @@ class SAuth(AsyncAuth):
             self.authenticate()
         return self._crypticle
 
-    def authenticate(self, _=None):  # TODO: remove unused var
+    def authenticate(
+        self, _=None
+    ):  # TODO: remove unused var # pylint: disable=invalid-overridden-method
         """
         Authenticate with the master, this method breaks the functional
         paradigm, it will update the master information from a fresh sign

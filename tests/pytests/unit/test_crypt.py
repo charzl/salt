@@ -1,3 +1,5 @@
+import asyncio
+import copy
 import logging
 import os
 
@@ -650,6 +652,399 @@ async def test_authenticate_missing_creds_attribute_67947(minion_root, io_loop, 
     assert isinstance(auth._creds, dict)
     assert auth._creds["aes"] == aes
     assert auth._creds["session"] == session
+
+
+@pytest.fixture
+def async_auth(minion_root, io_loop):
+    """
+    An ``AsyncAuth`` with fresh keys and no cached credentials, plus the
+    credentials a successful sign-in would return.
+    """
+    pki_dir = minion_root / "etc" / "salt" / "pki"
+    opts = {
+        "id": "minion",
+        "__role": "minion",
+        "pki_dir": str(pki_dir),
+        "master_uri": "tcp://127.0.0.1:4505",
+        "keysize": 4096,
+        "acceptance_wait_time": 0,
+        "acceptance_wait_time_max": 0,
+        "keys.cache_driver": "localfs_key",
+    }
+    priv, pub = crypt.gen_keys(opts["keysize"])
+    keypath = pki_dir / "minion"
+    keypath.with_suffix(".pem").write_text(priv)
+    keypath.with_suffix(".pub").write_text(pub)
+    credskey = (
+        opts["pki_dir"],
+        opts["id"],
+        opts["master_uri"],
+        str(os.path.getmtime(os.path.join(opts["pki_dir"], "minion.pem"))),
+    )
+    crypt.AsyncAuth.creds_map.pop(credskey, None)
+    creds = {
+        "enc": "pub",
+        "aes": crypt.Crypticle.generate_key_string(),
+        "session": crypt.Crypticle.generate_key_string(),
+    }
+    try:
+        yield crypt.AsyncAuth(opts, io_loop), creds
+    finally:
+        crypt.AsyncAuth.creds_map.pop(credskey, None)
+
+
+def _gated_sign_in(creds):
+    """
+    A ``sign_in`` replacement that waits for ``gate`` (the master being
+    unreachable until the test opens it) and records every call.
+    """
+    gate = asyncio.Event()
+    calls = []
+
+    async def sign_in(*args, **kwargs):
+        calls.append(None)
+        await gate.wait()
+        return creds
+
+    return sign_in, gate, calls
+
+
+async def test_authenticate_cancelled_caller_does_not_wedge_auth(async_auth):
+    """
+    https://github.com/saltstack/salt/issues/70642
+
+    While the master is unreachable a caller can give up (a request timeout
+    cancels it). That must not leave the minion unable to sign in again:
+    ``authenticated`` must not raise and the next caller must be able to
+    authenticate.
+    """
+    auth, creds = async_auth
+    auth.sign_in, gate, _ = _gated_sign_in(creds)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(auth.authenticate(), timeout=0.05)
+
+    assert auth.authenticated is False
+
+    gate.set()
+    assert await asyncio.wait_for(auth.authenticate(), timeout=5) is True
+    assert auth.authenticated is True
+
+
+async def test_authenticate_runs_one_sign_in_for_many_callers(async_auth):
+    """
+    Callers that need a sign-in at the same time wait for the same sign-in.
+    """
+    auth, creds = async_auth
+    auth.sign_in, gate, calls = _gated_sign_in(creds)
+
+    callers = [asyncio.ensure_future(auth.authenticate()) for _ in range(6)]
+    await asyncio.sleep(0.3)
+    assert len(calls) == 1
+
+    gate.set()
+    results = await asyncio.wait_for(asyncio.gather(*callers), timeout=5)
+
+    assert results == [True] * 6
+    assert len(calls) == 1
+    assert auth.authenticated is True
+
+
+async def test_authenticate_cancelling_a_caller_does_not_affect_the_others(
+    async_auth,
+):
+    """
+    A caller that joined a sign-in and gets cancelled only ends its own wait.
+    The sign-in and the other callers are not affected.
+    """
+    auth, creds = async_auth
+    auth.sign_in, gate, calls = _gated_sign_in(creds)
+
+    first = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0.3)
+    second = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0)
+    second.cancel()
+    gate.set()
+
+    assert await asyncio.wait_for(first, timeout=5) is True
+    with pytest.raises(asyncio.CancelledError):
+        await second
+    assert len(calls) == 1
+    assert auth.authenticated is True
+
+
+async def test_authenticate_cancelling_the_caller_that_started_it_keeps_the_sign_in(
+    async_auth,
+):
+    """
+    The caller that started a sign-in does not own it. Cancelling that caller
+    does not stop the sign-in, and the other callers still get its result
+    without a second sign-in.
+    """
+    auth, creds = async_auth
+    auth.sign_in, gate, calls = _gated_sign_in(creds)
+
+    starter = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0.3)
+    other = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0)
+    starter.cancel()
+    gate.set()
+
+    assert await asyncio.wait_for(other, timeout=5) is True
+    with pytest.raises(asyncio.CancelledError):
+        await starter
+    assert len(calls) == 1
+    assert auth.authenticated is True
+
+
+async def test_authenticate_wait_for_timeout_only_affects_that_caller(async_auth):
+    """
+    A caller that wraps ``authenticate`` in ``wait_for`` gives up after its
+    timeout. The other callers still get their sign-in.
+    """
+    auth, creds = async_auth
+    auth.sign_in, gate, calls = _gated_sign_in(creds)
+
+    first = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0.3)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(auth.authenticate(), timeout=0.05)
+    gate.set()
+
+    assert await asyncio.wait_for(first, timeout=5) is True
+    assert len(calls) == 1
+
+
+async def test_authenticate_sign_in_finishes_after_every_caller_gave_up(async_auth):
+    """
+    Callers that give up do not cancel the sign-in. A caller that comes later
+    joins the one that is running instead of starting another, and the
+    sign-in still finishes when the master comes back.
+    """
+    auth, creds = async_auth
+    auth.sign_in, gate, calls = _gated_sign_in(creds)
+
+    for _ in range(2):
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(auth.authenticate(), timeout=0.05)
+    # Give the sign-in time to start asking the master.
+    await asyncio.sleep(0.3)
+    assert len(calls) == 1
+    assert auth.authenticated is False
+
+    gate.set()
+    await asyncio.sleep(0.3)
+
+    assert auth.authenticated is True
+    assert len(calls) == 1
+
+
+async def test_authenticate_forced_reauth_from_many_callers_signs_in_once(
+    async_auth,
+):
+    """
+    After a key rotation every in-flight request calls ``authenticate`` while
+    ``authenticated`` is still true. They share one new sign-in.
+    """
+    auth, creds = async_auth
+    auth.sign_in, gate, calls = _gated_sign_in(creds)
+    gate.set()
+    await auth.authenticate()
+    assert auth.authenticated is True
+    calls.clear()
+
+    results = await asyncio.wait_for(
+        asyncio.gather(*[auth.authenticate() for _ in range(5)]), timeout=5
+    )
+
+    assert results == [True] * 5
+    assert len(calls) == 1
+    assert auth.authenticated is True
+
+
+async def test_authenticated_is_false_while_a_sign_in_runs(async_auth):
+    """
+    While a new sign-in runs, callers that check ``authenticated`` first wait
+    for it instead of using credentials that may be stale.
+    """
+    auth, creds = async_auth
+    auth.sign_in, gate, _ = _gated_sign_in(creds)
+    gate.set()
+    await auth.authenticate()
+    assert auth.authenticated is True
+
+    auth.sign_in, gate, _ = _gated_sign_in(creds)
+    task = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0.3)
+    assert auth.authenticated is False
+
+    gate.set()
+    assert await asyncio.wait_for(task, timeout=5) is True
+    assert auth.authenticated is True
+
+
+async def test_authenticate_failed_sign_in_raises_and_next_caller_signs_in_again(
+    async_auth,
+):
+    """
+    A failed sign-in raises in the caller that ran it and leaves the auth
+    object unauthenticated. The next caller signs in again.
+    """
+    auth, creds = async_auth
+    responses = ["bad enc algo", creds]
+
+    async def mock_sign_in(*args, **kwargs):
+        return responses.pop(0)
+
+    auth.sign_in = mock_sign_in
+
+    with pytest.raises(salt.exceptions.SaltClientError):
+        await auth.authenticate()
+    assert auth.authenticated is False
+
+    assert await auth.authenticate() is True
+    assert auth.authenticated is True
+
+
+async def test_authenticate_failed_sign_in_reaches_every_waiting_caller(async_auth):
+    """
+    A failed sign-in raises in every caller that waited for it, and it is one
+    sign-in, not one per caller.
+    """
+    auth, _ = async_auth
+    calls = []
+    gate = asyncio.Event()
+
+    async def mock_sign_in(*args, **kwargs):
+        calls.append(None)
+        await gate.wait()
+        return "bad enc algo"
+
+    auth.sign_in = mock_sign_in
+
+    callers = [asyncio.ensure_future(auth.authenticate()) for _ in range(3)]
+    await asyncio.sleep(0.3)
+    gate.set()
+    results = await asyncio.wait_for(
+        asyncio.gather(*callers, return_exceptions=True), timeout=5
+    )
+
+    assert all(isinstance(r, salt.exceptions.SaltClientError) for r in results)
+    assert len(calls) == 1
+    assert auth.authenticated is False
+
+
+async def test_authenticate_unexpected_error_reaches_every_waiting_caller(
+    async_auth,
+):
+    """
+    An error that ``_authenticate`` does not expect must reach the callers
+    too. They must not wait for ever (#70642).
+    """
+    auth, _ = async_auth
+    gate = asyncio.Event()
+
+    async def mock_sign_in(*args, **kwargs):
+        await gate.wait()
+        raise RuntimeError("unexpected")
+
+    auth.sign_in = mock_sign_in
+
+    callers = [asyncio.ensure_future(auth.authenticate()) for _ in range(2)]
+    await asyncio.sleep(0.3)
+    gate.set()
+    results = await asyncio.wait_for(
+        asyncio.gather(*callers, return_exceptions=True), timeout=5
+    )
+
+    assert all(isinstance(r, RuntimeError) for r in results)
+    assert auth.authenticated is False
+
+
+async def test_close_cancels_the_sign_in_and_callers_get_an_ordinary_error(
+    async_auth,
+):
+    """
+    Closing cancels the sign-in. The callers waiting for it get a
+    ``SaltClientError``, not a ``CancelledError`` that would cancel them too.
+    """
+    auth, creds = async_auth
+    auth.sign_in, _, _ = _gated_sign_in(creds)
+
+    callers = [asyncio.ensure_future(auth.authenticate()) for _ in range(2)]
+    await asyncio.sleep(0.3)
+    task = auth._current_sign_in.task
+
+    await auth.close()
+    results = await asyncio.wait_for(
+        asyncio.gather(*callers, return_exceptions=True), timeout=5
+    )
+
+    assert task.done()
+    assert all(isinstance(r, salt.exceptions.SaltClientError) for r in results)
+    assert auth.authenticated is False
+
+
+async def test_authenticate_calls_the_callback_after_a_successful_sign_in(
+    async_auth,
+):
+    auth, creds = async_auth
+    auth.sign_in, gate, _ = _gated_sign_in(creds)
+    gate.set()
+    results = []
+    called = asyncio.Event()
+
+    def callback(result):
+        results.append(result)
+        called.set()
+
+    await auth.authenticate(callback=callback)
+    await asyncio.wait_for(called.wait(), timeout=5)
+
+    assert results == [True]
+
+
+def test_sauth_is_not_authenticated_until_it_signs_in(minion_root, io_loop):
+    """
+    ``SAuth`` does not run ``AsyncAuth.__singleton_init__``, so ``authenticated``
+    must still be usable on it and be false.
+    """
+    pki_dir = minion_root / "etc" / "salt" / "pki"
+    opts = {
+        "id": "minion",
+        "__role": "minion",
+        "pki_dir": str(pki_dir),
+        "master_uri": "tcp://127.0.0.1:4505",
+        "keysize": 4096,
+        "keys.cache_driver": "localfs_key",
+    }
+    priv, pub = crypt.gen_keys(opts["keysize"])
+    keypath = pki_dir / "minion"
+    keypath.with_suffix(".pem").write_text(priv)
+    keypath.with_suffix(".pub").write_text(pub)
+
+    assert crypt.SAuth(opts, io_loop).authenticated is False
+
+
+async def test_async_auth_deepcopy_does_not_copy_the_current_sign_in(async_auth):
+    """
+    The current sign-in holds a task and an event, so it must be left out of a
+    deep copy like ``io_loop`` is.
+    """
+    auth, creds = async_auth
+    auth.sign_in, gate, _ = _gated_sign_in(creds)
+    gate.set()
+    await auth.authenticate()
+    sign_in = auth._current_sign_in
+    assert sign_in is not None
+
+    result = copy.deepcopy(auth)
+
+    # The copy either keeps the original sign-in (same singleton) or has none
+    # yet (a new instance). It never gets a copy of it.
+    assert result._current_sign_in is None or result._current_sign_in is sign_in
 
 
 # --- PublicKey / PrivateKey caching regression tests --------------------------

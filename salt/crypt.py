@@ -1035,14 +1035,20 @@ class _SignIn:
     ``error`` first if it failed. Callers wait for ``event`` and read
     ``error``. They never wait for ``task`` itself, so cancelling a caller
     cannot cancel the sign-in.
+
+    ``waiters`` counts the callers that are waiting. When it drops to zero a
+    timer is started (``idle_timer``) and the sign-in is cancelled if nobody
+    is waiting when it fires.
     """
 
-    __slots__ = ("task", "event", "error")
+    __slots__ = ("task", "event", "error", "waiters", "idle_timer")
 
     def __init__(self):
         self.task = None
         self.event = asyncio.Event()
         self.error = None
+        self.waiters = 0
+        self.idle_timer = None
 
     @property
     def done(self):
@@ -1064,6 +1070,7 @@ class AsyncAuth:
     # ``SAuth`` does not run ``__singleton_init__``, so give it defaults.
     _authenticated = False
     _current_sign_in = None
+    _closed = False
 
     _atfork_registered = False
 
@@ -1218,7 +1225,14 @@ class AsyncAuth:
         cancelling a caller (for example a request timeout) only ends that
         caller's wait. The sign-in keeps running and the other callers still
         get its result or its error.
+
+        When the last caller leaves, the sign-in is cancelled after a short
+        grace period, so that a sign-in nobody needs does not keep asking the
+        master. A caller that comes back within the grace period joins it
+        again.
         """
+        if self._closed:
+            raise SaltClientError("The sign-in was closed")
         sign_in = self._current_sign_in
         if sign_in is None or sign_in.done:
             # Nothing is running, or the last sign-in is over: start one.
@@ -1227,7 +1241,18 @@ class AsyncAuth:
             self._authenticated = False
             sign_in = self._current_sign_in = _SignIn()
             sign_in.task = self.io_loop.create_task(self._run_sign_in(sign_in))
-        await sign_in.event.wait()
+        sign_in.waiters += 1
+        if sign_in.idle_timer is not None:
+            sign_in.idle_timer.cancel()
+            sign_in.idle_timer = None
+        try:
+            await sign_in.event.wait()
+        finally:
+            sign_in.waiters -= 1
+            if sign_in.waiters == 0 and not sign_in.done:
+                sign_in.idle_timer = self.io_loop.call_later(
+                    self._sign_in_idle_grace(), self._cancel_if_idle, sign_in
+                )
         if sign_in.error is not None:
             raise sign_in.error
         if callback is not None:
@@ -1251,16 +1276,67 @@ class AsyncAuth:
         finally:
             sign_in.event.set()
 
+    def _sign_in_idle_grace(self):
+        """
+        How long a sign-in that nobody waits for is kept: the time one round
+        of ``sign_in`` may take, ``auth_timeout * auth_tries`` with the same
+        defaults as in ``sign_in``. Callers that give up after a short timeout
+        and ask again then do not cancel and restart the sign-in each time.
+        """
+        timeout = self.opts.get("auth_timeout", None)
+        tries = self.opts.get("auth_tries", None)
+        timeout = 60 if timeout is None else timeout
+        tries = 1 if tries is None else tries
+        return timeout * tries
+
+    def _cancel_if_idle(self, sign_in):
+        sign_in.idle_timer = None
+        if sign_in.waiters == 0 and not sign_in.done:
+            self._cancel_sign_in(sign_in)
+
+    def _cancel_sign_in(self, sign_in):
+        """
+        Cancel ``sign_in``. The reference to it is cleared first, so a caller
+        that arrives from now on starts a new sign-in and does not join one
+        that is being cancelled.
+        """
+        if self._current_sign_in is sign_in:
+            self._current_sign_in = None
+        if sign_in.idle_timer is not None:
+            sign_in.idle_timer.cancel()
+            sign_in.idle_timer = None
+        if sign_in.task is not None and not sign_in.task.done():
+            sign_in.task.cancel()
+
+    def cancel_sign_in(self):
+        """
+        Close this ``AsyncAuth``: cancel the sign-in that is running, if any,
+        and refuse to start another. It does not wait, so it can be called
+        from code that is not a coroutine, for example when a minion is
+        destroyed. The task stops the next time the loop runs. Returns that
+        task, or ``None``.
+
+        The callers waiting for the sign-in get a ``SaltClientError``. Callers
+        that come later get the same error at once, so a caller that retries
+        while the loop is shutting down does not start a new sign-in.
+
+        A channel must not call this when it closes: the instance is shared by
+        the channels of a loop. It is for whoever owns them all.
+        """
+        self._closed = True
+        sign_in = self._current_sign_in
+        if sign_in is None or sign_in.done:
+            return None
+        self._cancel_sign_in(sign_in)
+        return sign_in.task
+
     async def close(self, timeout=5):
         """
-        Cancel the sign-in that is running, if any, and wait for it to stop.
-        The callers waiting for it get a ``SaltClientError``.
+        Like ``cancel_sign_in``, and wait for the sign-in to stop.
         """
-        sign_in = self._current_sign_in
-        if sign_in is None or sign_in.done or sign_in.task is None:
-            return
-        sign_in.task.cancel()
-        await asyncio.wait({sign_in.task}, timeout=timeout)
+        task = self.cancel_sign_in()
+        if task is not None:
+            await asyncio.wait({task}, timeout=timeout)
 
     async def _authenticate(self):
         """

@@ -1045,6 +1045,166 @@ async def test_async_auth_deepcopy_does_not_copy_the_current_sign_in(async_auth)
     assert result._current_sign_in is None or result._current_sign_in is sign_in
 
 
+def _short_grace(auth, seconds=0.05):
+    """Make the time a sign-in nobody waits for is kept short."""
+    auth.opts["auth_timeout"] = seconds
+    auth.opts["auth_tries"] = 1
+
+
+async def test_sign_in_nobody_waits_for_is_cancelled_after_the_grace_period(
+    async_auth,
+):
+    """
+    When every caller has left, the sign-in does not keep asking the master
+    for ever. The next caller starts a new one.
+    """
+    auth, creds = async_auth
+    auth.sign_in, gate, calls = _gated_sign_in(creds)
+    _short_grace(auth)
+
+    caller = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0.3)
+    assert len(calls) == 1  # the sign-in is asking the master
+    task = auth._current_sign_in.task
+    caller.cancel()
+    await asyncio.sleep(0.4)
+
+    assert task.done()
+    assert auth._current_sign_in is None
+    assert auth.authenticated is False
+
+    gate.set()
+    assert await asyncio.wait_for(auth.authenticate(), timeout=5) is True
+    assert len(calls) == 2
+
+
+async def test_a_caller_that_comes_back_within_the_grace_period_keeps_the_sign_in(
+    async_auth,
+):
+    """
+    Callers that give up after a short timeout and ask again must not cancel
+    and restart the sign-in each time.
+    """
+    auth, creds = async_auth
+    auth.sign_in, gate, calls = _gated_sign_in(creds)
+    _short_grace(auth, 2)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(auth.authenticate(), timeout=0.05)
+    await asyncio.sleep(0.3)
+    second = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0.05)
+    gate.set()
+
+    assert await asyncio.wait_for(second, timeout=5) is True
+    assert len(calls) == 1
+
+
+async def test_a_caller_that_arrives_while_a_sign_in_is_being_cancelled_starts_a_new_one(
+    async_auth,
+):
+    """
+    The reference to a sign-in is cleared before it is cancelled, so a caller
+    that arrives before the task has stopped does not join it and get its
+    "interrupted" error.
+    """
+    auth, creds = async_auth
+    auth.sign_in, gate, calls = _gated_sign_in(creds)
+
+    first = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0.3)
+    auth._cancel_sign_in(auth._current_sign_in)
+    second = asyncio.ensure_future(auth.authenticate())
+    gate.set()
+
+    results = await asyncio.wait_for(
+        asyncio.gather(first, second, return_exceptions=True), timeout=5
+    )
+
+    assert isinstance(results[0], salt.exceptions.SaltClientError)
+    assert results[1] is True
+    assert len(calls) == 2
+
+
+async def test_close_refuses_new_sign_ins(async_auth):
+    """
+    After ``close`` the callers that waited get an ordinary error, and a
+    caller that comes later gets one at once instead of starting a sign-in.
+    """
+    auth, creds = async_auth
+    auth.sign_in, _, calls = _gated_sign_in(creds)
+
+    caller = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0.3)
+    await auth.close()
+
+    result = await asyncio.wait_for(
+        asyncio.gather(caller, return_exceptions=True), timeout=5
+    )
+    assert isinstance(result[0], salt.exceptions.SaltClientError)
+    assert auth._current_sign_in is None
+
+    with pytest.raises(salt.exceptions.SaltClientError, match="closed"):
+        await auth.authenticate()
+    assert len(calls) == 1
+
+
+async def test_a_caller_that_arrives_while_the_sign_in_is_being_closed_does_not_join_it(
+    async_auth,
+):
+    """
+    ``cancel_sign_in`` does not wait for the task to stop. A caller that
+    arrives in that time is refused at once. It is not left to join a sign-in
+    that is about to end, and it does not start a new one.
+    """
+    auth, creds = async_auth
+    auth.sign_in, _, calls = _gated_sign_in(creds)
+
+    caller = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0.3)
+    task = auth.cancel_sign_in()
+    assert task is not None and not task.done()
+
+    with pytest.raises(salt.exceptions.SaltClientError, match="closed"):
+        await auth.authenticate()
+    result = await asyncio.wait_for(
+        asyncio.gather(caller, return_exceptions=True), timeout=5
+    )
+
+    assert isinstance(result[0], salt.exceptions.SaltClientError)
+    assert len(calls) == 1
+
+
+async def test_cancel_sign_in_without_a_sign_in_running_only_closes(async_auth):
+    auth, _ = async_auth
+
+    assert auth.cancel_sign_in() is None
+    with pytest.raises(salt.exceptions.SaltClientError, match="closed"):
+        await auth.authenticate()
+
+
+async def test_the_waiter_count_goes_back_to_zero(async_auth):
+    auth, creds = async_auth
+    auth.sign_in, gate, _ = _gated_sign_in(creds)
+    gate.set()
+
+    callers = [asyncio.ensure_future(auth.authenticate()) for _ in range(4)]
+    await asyncio.wait_for(asyncio.gather(*callers), timeout=5)
+    assert auth._current_sign_in.waiters == 0
+
+    # Also for callers that were cancelled while they waited.
+    auth.sign_in, gate, _ = _gated_sign_in(creds)
+    cancelled = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0.3)
+    sign_in = auth._current_sign_in
+    assert sign_in.waiters == 1
+    cancelled.cancel()
+    await asyncio.sleep(0)
+    assert sign_in.waiters == 0
+    gate.set()
+    await asyncio.sleep(0.3)
+
+
 # --- PublicKey / PrivateKey caching regression tests --------------------------
 
 

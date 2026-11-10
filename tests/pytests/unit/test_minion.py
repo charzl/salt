@@ -3790,6 +3790,26 @@ def test_terminate_subprocess_list_still_signals_real_processes():
     assert kill_mock.call_args[0][0] == 4242
 
 
+def test_minion_destroy_stops_a_sign_in_that_is_still_retrying():
+    """
+    The channels of a minion share one AsyncAuth, so the minion stops its
+    sign-in when it is destroyed, before it closes the channels. A sign-in that
+    is still retrying must not outlive the minion.
+    """
+    pub_channel = MagicMock()
+    order = []
+    pub_channel.auth.cancel_sign_in.side_effect = lambda: order.append("sign-in")
+    pub_channel.close.side_effect = lambda: order.append("channel")
+    minion = MagicMock()
+    minion.pub_channel = pub_channel
+    minion.req_channel = None
+
+    salt.minion.Minion.destroy(minion)
+
+    pub_channel.auth.cancel_sign_in.assert_called_once_with()
+    assert order == ["sign-in", "channel"]
+
+
 def test_masterminion_del_silent_after_destroy():
     """
     Regression test for GH #70174.

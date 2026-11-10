@@ -1041,7 +1041,7 @@ class _SignIn:
     is waiting when it fires.
     """
 
-    __slots__ = ("task", "event", "error", "waiters", "idle_timer")
+    __slots__ = ("task", "event", "error", "waiters", "idle_timer", "cancelled_here")
 
     def __init__(self):
         self.task = None
@@ -1049,6 +1049,8 @@ class _SignIn:
         self.error = None
         self.waiters = 0
         self.idle_timer = None
+        # True when ``AsyncAuth`` cancelled the task itself.
+        self.cancelled_here = False
 
     @property
     def done(self):
@@ -1267,10 +1269,16 @@ class AsyncAuth:
             await self._authenticate()
         except Exception as exc:  # pylint: disable=broad-except
             sign_in.error = exc
-        except BaseException:
-            # The task was cancelled (see ``close``) or the process is
-            # exiting. Callers get an ordinary error: handing them a
-            # CancelledError would cancel them too.
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError) and not sign_in.cancelled_here:
+                # Somebody else cancelled the task. The loop is being shut
+                # down, for example ``SyncWrapper.close`` cancels and drains
+                # the tasks of its loop. Callers get an error they may retry
+                # on, and a retry must not start another sign-in on a loop
+                # that is closing.
+                self._closed = True
+            # Callers get an ordinary error: handing them a CancelledError
+            # would cancel them too.
             sign_in.error = SaltClientError("The sign-in was interrupted")
             raise
         finally:
@@ -1306,6 +1314,7 @@ class AsyncAuth:
             sign_in.idle_timer.cancel()
             sign_in.idle_timer = None
         if sign_in.task is not None and not sign_in.task.done():
+            sign_in.cancelled_here = True
             sign_in.task.cancel()
 
     def cancel_sign_in(self):

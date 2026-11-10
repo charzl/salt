@@ -829,6 +829,8 @@ async def test_authenticate_sign_in_finishes_after_every_caller_gave_up(async_au
     for _ in range(2):
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(auth.authenticate(), timeout=0.05)
+    # Give the sign-in time to start asking the master.
+    await asyncio.sleep(0.3)
     assert len(calls) == 1
     assert auth.authenticated is False
 
@@ -1173,6 +1175,48 @@ async def test_a_caller_that_arrives_while_the_sign_in_is_being_closed_does_not_
 
     assert isinstance(result[0], salt.exceptions.SaltClientError)
     assert len(calls) == 1
+
+
+async def test_a_sign_in_that_somebody_else_cancels_closes_the_auth(async_auth):
+    """
+    ``SyncWrapper.close`` cancels the tasks of its loop itself, without asking
+    ``AsyncAuth``. A caller that retries after the error it gets must not
+    start a new sign-in on that loop.
+    """
+    auth, creds = async_auth
+    auth.sign_in, _, calls = _gated_sign_in(creds)
+
+    caller = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0.3)
+    auth._current_sign_in.task.cancel()  # what SyncWrapper does when it drains
+    result = await asyncio.wait_for(
+        asyncio.gather(caller, return_exceptions=True), timeout=5
+    )
+
+    assert isinstance(result[0], salt.exceptions.SaltClientError)
+    with pytest.raises(salt.exceptions.SaltClientError, match="closed"):
+        await auth.authenticate()
+    assert len(calls) == 1
+
+
+async def test_a_sign_in_that_asyncauth_cancels_itself_does_not_close_it(async_auth):
+    """
+    Cancelling a sign-in nobody waits for is not a shutdown. The next caller
+    starts a new one.
+    """
+    auth, creds = async_auth
+    auth.sign_in, gate, calls = _gated_sign_in(creds)
+    _short_grace(auth)
+
+    caller = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0.3)
+    caller.cancel()
+    await asyncio.sleep(0.4)
+    assert auth._closed is False
+
+    gate.set()
+    assert await asyncio.wait_for(auth.authenticate(), timeout=5) is True
+    assert len(calls) == 2
 
 
 async def test_cancel_sign_in_without_a_sign_in_running_only_closes(async_auth):

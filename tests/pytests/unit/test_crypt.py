@@ -1047,6 +1047,175 @@ async def test_async_auth_deepcopy_does_not_copy_the_current_sign_in(async_auth)
     assert result._current_sign_in is None or result._current_sign_in is sign_in
 
 
+class _FakeChannel:
+    """
+    Stands in for ``AsyncReqChannel`` so a test can see which channel each
+    sign-in round uses and which channels get closed.
+    """
+
+    def __init__(self, hang_on_close=False):
+        self.closed = False
+        self._hang_on_close = hang_on_close
+
+    async def close_async(self):
+        if self._hang_on_close:
+            await asyncio.sleep(3600)
+        self.closed = True
+
+
+class _Channels(list):
+    """The channels that were created. Set ``hang_on_close`` before a round."""
+
+    hang_on_close = False
+
+
+@pytest.fixture
+def fake_channels(monkeypatch, async_auth):
+    """
+    Replace ``AsyncReqChannel.factory`` with one that hands out
+    ``_FakeChannel`` objects, and make a sign-in round time out quickly.
+    Returns the list of the channels that were created.
+    """
+    auth, _ = async_auth
+    created = _Channels()
+
+    def factory(*args, **kwargs):
+        channel = _FakeChannel(hang_on_close=created.hang_on_close)
+        created.append(channel)
+        return channel
+
+    monkeypatch.setattr(
+        crypt.salt.channel.client.AsyncReqChannel, "factory", staticmethod(factory)
+    )
+    monkeypatch.setitem(auth.opts, "auth_timeout", 0.05)
+    monkeypatch.setitem(auth.opts, "auth_tries", 1)
+    monkeypatch.setattr(crypt.AsyncAuth, "_sign_in_round_margin", 0.1)
+    monkeypatch.setattr(crypt._SignInChannel, "close_limit", 0.1)
+    return created
+
+
+async def test_sign_in_round_that_hangs_is_dropped_and_the_next_round_uses_a_new_channel(
+    async_auth, fake_channels
+):
+    """
+    A round that does not finish in time is dropped with its channel. The next
+    round opens a new channel. The callers waiting for the sign-in are not
+    affected and get its result.
+    """
+    auth, creds = async_auth
+    used = []
+
+    async def sign_in(*args, channel=None, **kwargs):
+        used.append(channel)
+        if len(used) == 1:
+            await asyncio.sleep(3600)  # the first round hangs
+        return creds
+
+    auth.sign_in = sign_in
+
+    callers = [asyncio.ensure_future(auth.authenticate()) for _ in range(3)]
+    results = await asyncio.wait_for(asyncio.gather(*callers), timeout=5)
+
+    assert results == [True] * 3
+    assert len(used) == 2
+    assert used[0] is not used[1]
+    assert used[0].closed is True
+    assert auth.authenticated is True
+    # The second channel is closed when the sign-in ends.
+    assert used[1].closed is True
+    assert len(fake_channels) == 2
+
+
+async def test_sign_in_channel_is_kept_for_rounds_that_do_not_time_out(
+    async_auth, fake_channels
+):
+    """
+    A round that ends with "retry" before its limit keeps the channel, so a
+    healthy sign-in does not open and close a channel every round.
+    """
+    auth, creds = async_auth
+    answers = ["retry", "retry", creds]
+    used = []
+
+    async def sign_in(*args, channel=None, **kwargs):
+        used.append(channel)
+        return answers.pop(0)
+
+    auth.sign_in = sign_in
+
+    assert await asyncio.wait_for(auth.authenticate(), timeout=5) is True
+
+    assert len(used) == 3
+    assert used[0] is used[1] is used[2]
+    assert len(fake_channels) == 1
+    assert fake_channels[0].closed is True
+
+
+async def test_closing_while_a_round_runs_is_not_a_round_timeout(
+    async_auth, fake_channels
+):
+    """
+    Cancelling the sign-in is not a round timeout. It must not be turned into
+    a retry on a new channel: the callers get an ordinary error and no new
+    round starts.
+    """
+    auth, creds = async_auth
+    auth.sign_in, _, calls = _gated_sign_in(creds)
+    # The round limit is short in this test, so give the round time to start
+    # and cancel it before the limit.
+    auth.opts["auth_timeout"] = 5
+
+    caller = asyncio.ensure_future(auth.authenticate())
+    await asyncio.sleep(0.3)
+    await auth.close()
+    results = await asyncio.wait_for(
+        asyncio.gather(caller, return_exceptions=True), timeout=5
+    )
+
+    assert isinstance(results[0], salt.exceptions.SaltClientError)
+    assert len(calls) == 1
+    assert len(fake_channels) == 1
+
+
+async def test_a_channel_that_does_not_close_is_given_up_after_the_close_limit(
+    async_auth, fake_channels
+):
+    """
+    A stuck round whose channel also hangs when it is closed must not hold up
+    the sign-in: after the close limit the channel is given up and the next
+    round goes on.
+    """
+    auth, creds = async_auth
+    fake_channels.hang_on_close = True
+    used = []
+
+    async def sign_in(*args, channel=None, **kwargs):
+        used.append(channel)
+        if len(used) == 1:
+            await asyncio.sleep(3600)
+        return creds
+
+    auth.sign_in = sign_in
+
+    assert await asyncio.wait_for(auth.authenticate(), timeout=5) is True
+
+    assert len(used) == 2
+    assert used[0] is not used[1]
+    assert used[0].closed is False
+
+
+def test_sign_in_round_limit_uses_auth_timeout_and_auth_tries(async_auth):
+    auth, _ = async_auth
+    auth.opts["auth_timeout"] = 5
+    auth.opts["auth_tries"] = 7
+    assert auth._sign_in_round_limit() == 5 * 7 + crypt.AsyncAuth._sign_in_round_margin
+
+    # The same defaults as ``sign_in`` when the options are not set.
+    auth.opts.pop("auth_timeout")
+    auth.opts.pop("auth_tries")
+    assert auth._sign_in_round_limit() == 60 + crypt.AsyncAuth._sign_in_round_margin
+
+
 # --- PublicKey / PrivateKey caching regression tests --------------------------
 
 

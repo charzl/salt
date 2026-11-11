@@ -1049,6 +1049,64 @@ class _SignIn:
         return self.event.is_set()
 
 
+class _SignInChannel:
+    """
+    The request channel that a sign-in uses.
+
+    It is opened when the first round needs it and kept for the rounds that
+    follow. A round that does not finish in time is dropped together with its
+    channel (see ``discard``) and the next round opens a new one, so a
+    channel that is stuck does not hold up the sign-in.
+    """
+
+    # How long to wait for a channel to close before giving up on it.
+    close_limit = 5
+
+    def __init__(self, opts, io_loop):
+        self.opts = opts
+        self.io_loop = io_loop
+        self._channel = None
+
+    def get(self):
+        if self._channel is None:
+            self._channel = salt.channel.client.AsyncReqChannel.factory(
+                self.opts, crypt="clear", io_loop=self.io_loop
+            )
+        return self._channel
+
+    async def discard(self):
+        channel, self._channel = self._channel, None
+        if channel is None:
+            return
+        try:
+            await _timeout_after(self.close_limit, channel.close_async())
+        except asyncio.TimeoutError:
+            log.warning(
+                "Closing the sign-in channel took longer than %s seconds, "
+                "giving up on it",
+                self.close_limit,
+            )
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        await self.discard()
+
+
+async def _timeout_after(limit, awaitable):
+    """
+    Wait for ``awaitable`` for at most ``limit`` seconds and raise
+    ``asyncio.TimeoutError`` if it takes longer. ``asyncio.timeout`` is used
+    where it exists (Python 3.11+); ``asyncio.wait_for`` is not as careful
+    with a cancel that arrives at the same time as the timeout.
+    """
+    if hasattr(asyncio, "timeout"):
+        async with asyncio.timeout(limit):
+            return await awaitable
+    return await asyncio.wait_for(awaitable, limit)
+
+
 class AsyncAuth:
     """
     Set up an Async object to maintain authentication with the salt master
@@ -1064,6 +1122,11 @@ class AsyncAuth:
     # ``SAuth`` does not run ``__singleton_init__``, so give it defaults.
     _authenticated = False
     _current_sign_in = None
+
+    # Seconds added to ``auth_timeout * auth_tries`` to get the time one
+    # sign-in round may take. A round covers the requests and also opening
+    # and closing the channel.
+    _sign_in_round_margin = 10
 
     _atfork_registered = False
 
@@ -1251,6 +1314,20 @@ class AsyncAuth:
         finally:
             sign_in.event.set()
 
+    def _sign_in_round_limit(self):
+        """
+        The time one round of ``sign_in`` may take. ``sign_in`` itself stops
+        asking after ``auth_timeout * auth_tries`` seconds (with the same
+        defaults as in ``sign_in``), so a round that takes longer than that
+        plus a margin is stuck, for example while it opens or closes its
+        channel.
+        """
+        timeout = self.opts.get("auth_timeout", None)
+        tries = self.opts.get("auth_tries", None)
+        timeout = 60 if timeout is None else timeout
+        tries = 1 if tries is None else tries
+        return timeout * tries + self._sign_in_round_margin
+
     async def close(self, timeout=5):
         """
         Cancel the sign-in that is running, if any, and wait for it to stop.
@@ -1278,9 +1355,7 @@ class AsyncAuth:
             acceptance_wait_time_max = acceptance_wait_time
         creds = None
 
-        async with salt.channel.client.AsyncReqChannel.factory(
-            self.opts, crypt="clear", io_loop=self.io_loop
-        ) as channel:
+        async with _SignInChannel(self.opts, self.io_loop) as channels:
             error = None
             attempts = 0
             # ``auth_retries`` caps the outer retry loop introduced for
@@ -1296,8 +1371,21 @@ class AsyncAuth:
                 # to allow the IOLoop to run any other scheduled tasks.
                 await asyncio.sleep(0.1)
                 attempts += 1
+                round_limit = self._sign_in_round_limit()
                 try:
-                    creds = await self.sign_in(channel=channel)
+                    creds = await _timeout_after(
+                        round_limit, self.sign_in(channel=channels.get())
+                    )
+                except asyncio.TimeoutError:
+                    # The round is stuck. Drop it with its channel and start
+                    # the next round on a new channel, as after any "retry".
+                    log.warning(
+                        "A sign-in round did not finish in %s seconds, "
+                        "dropping its channel and starting a new round",
+                        round_limit,
+                    )
+                    await channels.discard()
+                    creds = "retry"
                 except SaltClientError as exc:
                     error = exc
                     break

@@ -68,15 +68,34 @@ line-length = 88
 extend-exclude = ["salt/ext", "templates"]
 
 [tool.ruff.lint]
-# Start with a small set of correctness checks, alongside Salt's pylint plugins.
-# Black remains the formatter. Type checking is a separate rollout.
+# Correctness checks, alongside Salt's pylint plugins. Black remains the
+# formatter. Type checking is a separate rollout.
+#
+# Only new violations are blocking (see tools/precommit/ruff.py), so adding a
+# rule here does not require cleaning up existing code.
 select = [
     "F401",  # unused imports
+    "F402",  # import shadowed by a loop variable
     "F541",  # f-strings without placeholders
     "F631",  # assertions with a non-empty tuple (always true)
     "F634",  # conditions with a non-empty tuple (always true)
+    "F811",  # redefinition of an unused name
+    "F841",  # unused local variables
+    "E711",  # comparison to None with == or !=
+    "E712",  # comparison to True or False with == or !=
+    "E713",  # "not x in y" instead of "x not in y"
+    "E714",  # "not x is y" instead of "x is not y"
+    "E722",  # bare except
+    "B005",  # strip() with a multi-character string
     "B006",  # mutable argument defaults
+    "B011",  # assert False
+    "B015",  # pointless comparison
+    "B017",  # assertRaises(Exception) / pytest.raises(Exception)
+    "B018",  # useless expression
+    "B020",  # loop variable overrides the iterable
     "B023",  # loop variables captured without binding
+    "B025",  # duplicate exception in a try statement
+    "B904",  # raise inside except without "from"
 ]
 
 [tool.towncrier]

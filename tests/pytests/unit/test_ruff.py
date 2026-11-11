@@ -249,6 +249,32 @@ def test_inherited_git_hook_environment_is_isolated(
             "callbacks = []\nfor index in range(3):\n    callbacks.append(lambda: index)\n",
             "B023",
         ),
+        ("import os\n\nfor os in range(3):\n    pass\n", "F402"),
+        ("def f():\n    return 1\n\n\ndef f():\n    return 2\n", "F811"),
+        ("def f():\n    unused = 1\n    return 2\n", "F841"),
+        ("value = 1\nif value == None:\n    pass\n", "E711"),
+        ("value = 1\nif value == True:\n    pass\n", "E712"),
+        ("value = 1\nif not value in [1]:\n    pass\n", "E713"),
+        ("value = None\nif not value is None:\n    pass\n", "E714"),
+        ("try:\n    pass\nexcept:\n    pass\n", "E722"),
+        ("'http://example'.strip('http://')\n", "B005"),
+        ("assert False\n", "B011"),
+        ("value = 1\nvalue == 2\n", "B015"),
+        (
+            "import pytest\n\n\ndef test_x():\n    with pytest.raises(Exception):\n        pass\n",
+            "B017",
+        ),
+        ("42\n", "B018"),
+        ("items = [1, 2]\nfor items in items:\n    pass\n", "B020"),
+        (
+            "try:\n    pass\nexcept ValueError:\n    pass\nexcept ValueError:\n    pass\n",
+            "B025",
+        ),
+        (
+            "def f():\n    try:\n        return int('1')\n    except ValueError:\n"
+            "        raise RuntimeError('x')\n",
+            "B904",
+        ),
     ],
 )
 def test_additional_rules_are_enforced(repo: Path, source: str, code: str) -> None:
@@ -256,3 +282,14 @@ def test_additional_rules_are_enforced(repo: Path, source: str, code: str) -> No
     result = check(repo)
     assert result.returncode == 1, result.stderr + result.stdout
     assert code in result.stdout
+
+
+def test_existing_violation_of_a_newer_rule_is_not_enforced(repo: Path) -> None:
+    """A rule can be added without cleaning up code that already breaks it."""
+    broken = "try:\n    pass\nexcept:\n    pass\n"
+    write(repo, "legacy.py", broken)
+    commit(repo)
+    write(repo, "legacy.py", "# A new comment moves the lines\n\n" + broken)
+    result = check(repo)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "0 new violation(s)" in result.stdout

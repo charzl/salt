@@ -52,10 +52,19 @@ Incremental Ruff Checks (3008 and Later)
 ========================================
 
 Ruff runs alongside pylint in pre-commit and CI. Black remains the formatter.
-The initial rules check unused imports, f-strings without placeholders,
-always-true tuple assertions and conditions, mutable argument defaults, and
-loop variables captured by nested functions. This check does not enforce type
+The rules are listed in ``pyproject.toml`` under ``[tool.ruff.lint]``. They
+check unused imports and local variables, redefined names, f-strings without
+placeholders, always-true tuple assertions and conditions, mutable argument
+defaults, loop variables captured by nested functions or overriding their
+iterable, bare ``except``, ``raise`` inside ``except`` without ``from``,
+comparisons to ``None``, ``True`` and ``False`` with ``==``, ``not x in y`` and
+``not x is y``, ``assert False``, pointless comparisons and expressions,
+``assertRaises(Exception)``, ``strip()`` with a multi-character string, and
+duplicate exceptions in a ``try`` statement. This check does not enforce type
 annotations or replace mypy.
+
+Inside an ``except`` block, write ``raise NewError(...) from err`` to keep the
+original exception as the cause, or ``from None`` to hide it.
 
 Only new violations are blocking. CI compares with the pull request's target
 commit using the same Ruff version and configuration on both revisions.

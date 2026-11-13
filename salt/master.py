@@ -77,6 +77,7 @@ from salt.cli.batch_async import BatchAsync, batch_async_required
 from salt.config import DEFAULT_INTERVAL
 from salt.defaults import DEFAULT_TARGET_DELIM
 from salt.exceptions import UnsupportedAlgorithm
+from salt.key import KeyAct
 from salt.transport import TRANSPORTS
 from salt.utils.cache import CacheCli
 from salt.utils.channel import iter_transport_opts
@@ -1655,7 +1656,7 @@ class EventMonitor(salt.utils.process.SignalHandlingProcess):
     _PEER_KEY_STATE = {
         act: salt.key.Key.DIR_MAP[state]
         for state, act in salt.key.Key.ACT_MAP.items()
-        if act not in (salt.key.KeyAct.DENY, salt.key.KeyAct.DELETE)
+        if act not in (KeyAct.DENY, KeyAct.DELETE)
     }
 
     def _delegate_on_miss(self, data_type, key, write_kind, payload):
@@ -1736,7 +1737,7 @@ class EventMonitor(salt.utils.process.SignalHandlingProcess):
         public key PEM (None for ``delete``).
         """
         try:
-            act = salt.key.KeyAct(act)
+            act = KeyAct(act)
         except ValueError:
             log.warning(
                 "Ignoring peer key change for minion %s: unknown act %r",
@@ -1745,7 +1746,7 @@ class EventMonitor(salt.utils.process.SignalHandlingProcess):
             )
             return
         cache = salt.cache.Cache(self.opts, driver=self.opts["keys.cache_driver"])
-        if act == salt.key.KeyAct.DELETE:
+        if act == KeyAct.DELETE:
             try:
                 cache.flush("keys", minion_id)
             except Exception:  # pylint: disable=broad-except
@@ -1760,7 +1761,7 @@ class EventMonitor(salt.utils.process.SignalHandlingProcess):
             return
         if not pub:
             return
-        if act == salt.key.KeyAct.DENY:
+        if act == KeyAct.DENY:
             cache.store("denied_keys", minion_id, [pub])
             log.info("Applied peer key change: deny minion %s", minion_id)
             return
@@ -4941,7 +4942,7 @@ class AuthFuncs(TransportMethods):
             await self.event.fire_event_async(
                 {
                     "result": True,
-                    "act": salt.key.KeyAct.ACCEPT.value,
+                    "act": KeyAct.ACCEPT.value,
                     "id": load["id"],
                     "pub": load["pub"],
                 },
@@ -5510,7 +5511,7 @@ class AuthFuncs(TransportMethods):
             self.event.fire_event(
                 {
                     "result": True,
-                    "act": salt.key.KeyAct.ACCEPT.value,
+                    "act": KeyAct.ACCEPT.value,
                     "id": load["id"],
                     "pub": load["pub"],
                 },

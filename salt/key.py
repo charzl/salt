@@ -1632,7 +1632,12 @@ class ClientKey(Key):
                     key["state"] = self.DIR_MAP[to_state]
                     self.cache.store(self.KEYS_CACHE, keyname, key)
 
-                eload = {"result": True, "act": self.DIR_MAP[to_state], "id": keyname}
+                eload = {
+                    "result": True,
+                    "act": self.DIR_MAP[to_state],
+                    "id": keyname,
+                    "scope": "client",
+                }
                 self.event.fire_event(eload, salt.utils.event.tagify(prefix="key"))
 
         for key in invalid_keys:
@@ -1663,7 +1668,12 @@ class ClientKey(Key):
                         self.cache.flush(self.DENIED_CACHE, key)
                     else:
                         self.cache.flush(self.KEYS_CACHE, key)
-                    eload = {"result": True, "act": "delete", "id": key}
+                    eload = {
+                        "result": True,
+                        "act": KeyAct.DELETE.value,
+                        "id": key,
+                        "scope": "client",
+                    }
                     self.event.fire_event(eload, salt.utils.event.tagify(prefix="key"))
                 except OSError:
                     pass
@@ -1686,7 +1696,12 @@ class ClientKey(Key):
             for key in keys:
                 try:
                     self.cache.flush(self.KEYS_CACHE, key)
-                    eload = {"result": True, "act": "delete", "id": key}
+                    eload = {
+                        "result": True,
+                        "act": KeyAct.DELETE.value,
+                        "id": key,
+                        "scope": "client",
+                    }
                     self.event.fire_event(eload, salt.utils.event.tagify(prefix="key"))
                 except OSError:
                     pass

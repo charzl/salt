@@ -1569,7 +1569,9 @@ class EventMonitor(salt.utils.process.SignalHandlingProcess):
                 act = data.get("act")
                 minion_id = data.get("id")
                 pub = data.get("pub")
-                if minion_id and act:
+                # Only minion keys are mirrored.  Client and master key
+                # events carry a ``scope`` and live in other banks.
+                if minion_id and act and not data.get("scope"):
                     try:
                         self._apply_peer_key_change(act, minion_id, pub)
                     except Exception:  # pylint: disable=broad-except

@@ -158,3 +158,29 @@ def test_unknown_peer_key_act_logs_warning():
         monitor._apply_peer_key_change("bogus", "minion", "PUB")
     warning.assert_called_once()
     cache_cls.return_value.store.assert_not_called()
+
+
+def test_client_key_act_map_matches_key_act_map():
+    """
+    ``ClientKey`` must fire the same short-form acts as ``Key`` (it used to
+    fire the long-form state names).
+    """
+    client = [
+        salt.key.ClientKey.ACT_MAP[s]
+        for s in (
+            salt.key.ClientKey.ACC,
+            salt.key.ClientKey.REJ,
+            salt.key.ClientKey.PEND,
+            salt.key.ClientKey.DEN,
+        )
+    ]
+    key = [
+        salt.key.Key.ACT_MAP[s]
+        for s in (
+            salt.key.Key.ACC,
+            salt.key.Key.REJ,
+            salt.key.Key.PEND,
+            salt.key.Key.DEN,
+        )
+    ]
+    assert client == key

@@ -1502,10 +1502,10 @@ class ClientKey(Key):
     }
 
     ACT_MAP = {
-        "clients": "accept",
-        "clients_rejected": "reject",
-        "clients_pre": "pend",
-        "clients_denied": "denied",
+        ACC: KeyAct.ACCEPT,
+        REJ: KeyAct.REJECT,
+        PEND: KeyAct.PEND,
+        DEN: KeyAct.DENY,
     }
 
     # Cache keys for client authentication
@@ -1634,7 +1634,7 @@ class ClientKey(Key):
 
                 eload = {
                     "result": True,
-                    "act": self.DIR_MAP[to_state],
+                    "act": self.ACT_MAP[to_state].value,
                     "id": keyname,
                     "scope": "client",
                 }

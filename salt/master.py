@@ -1649,10 +1649,13 @@ class EventMonitor(salt.utils.process.SignalHandlingProcess):
             master_id,
         )
 
+    # Derived from ``Key.ACT_MAP`` so sender and receiver cannot drift.
+    # ``deny`` and ``delete`` are handled separately in
+    # ``_apply_peer_key_change``.
     _PEER_KEY_STATE = {
-        "accept": "accepted",
-        "reject": "rejected",
-        "pend": "pending",
+        salt.key.KeyAct(act): salt.key.Key.DIR_MAP[dir_]
+        for dir_, act in salt.key.Key.ACT_MAP.items()
+        if act not in (salt.key.KeyAct.DENY.value, salt.key.KeyAct.DELETE.value)
     }
 
     def _delegate_on_miss(self, data_type, key, write_kind, payload):
@@ -1732,8 +1735,17 @@ class EventMonitor(salt.utils.process.SignalHandlingProcess):
         ``act`` is one of accept/reject/pend/deny/delete; ``pub`` is the
         public key PEM (None for ``delete``).
         """
+        try:
+            act = salt.key.KeyAct(act)
+        except ValueError:
+            log.warning(
+                "Ignoring peer key change for minion %s: unknown act %r",
+                minion_id,
+                act,
+            )
+            return
         cache = salt.cache.Cache(self.opts, driver=self.opts["keys.cache_driver"])
-        if act == "delete":
+        if act == salt.key.KeyAct.DELETE:
             try:
                 cache.flush("keys", minion_id)
             except Exception:  # pylint: disable=broad-except
@@ -1748,17 +1760,22 @@ class EventMonitor(salt.utils.process.SignalHandlingProcess):
             return
         if not pub:
             return
-        if act == "deny":
+        if act == salt.key.KeyAct.DENY:
             cache.store("denied_keys", minion_id, [pub])
             log.info("Applied peer key change: deny minion %s", minion_id)
             return
         state = self._PEER_KEY_STATE.get(act)
         if state is None:
+            log.warning(
+                "Ignoring peer key change for minion %s: unhandled act %r",
+                minion_id,
+                act.value,
+            )
             return
         cache.store("keys", minion_id, {"state": state, "pub": pub})
         log.info(
             "Applied peer key change: %s minion %s (state=%s)",
-            act,
+            act.value,
             minion_id,
             state,
         )
@@ -4924,7 +4941,7 @@ class AuthFuncs(TransportMethods):
             await self.event.fire_event_async(
                 {
                     "result": True,
-                    "act": "accept",
+                    "act": salt.key.KeyAct.ACCEPT.value,
                     "id": load["id"],
                     "pub": load["pub"],
                 },
@@ -5493,7 +5510,7 @@ class AuthFuncs(TransportMethods):
             self.event.fire_event(
                 {
                     "result": True,
-                    "act": "accept",
+                    "act": salt.key.KeyAct.ACCEPT.value,
                     "id": load["id"],
                     "pub": load["pub"],
                 },

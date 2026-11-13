@@ -1653,9 +1653,9 @@ class EventMonitor(salt.utils.process.SignalHandlingProcess):
     # ``deny`` and ``delete`` are handled separately in
     # ``_apply_peer_key_change``.
     _PEER_KEY_STATE = {
-        salt.key.KeyAct(act): salt.key.Key.DIR_MAP[dir_]
-        for dir_, act in salt.key.Key.ACT_MAP.items()
-        if act not in (salt.key.KeyAct.DENY.value, salt.key.KeyAct.DELETE.value)
+        act: salt.key.Key.DIR_MAP[state]
+        for state, act in salt.key.Key.ACT_MAP.items()
+        if act not in (salt.key.KeyAct.DENY, salt.key.KeyAct.DELETE)
     }
 
     def _delegate_on_miss(self, data_type, key, write_kind, payload):

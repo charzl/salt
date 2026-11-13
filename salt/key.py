@@ -509,10 +509,10 @@ class Key:
     # long-form ``DIR_MAP`` values that are stored as the local cache
     # ``state`` field.  See issue #70401.
     ACT_MAP = {
-        ACC: KeyAct.ACCEPT.value,
-        REJ: KeyAct.REJECT.value,
-        PEND: KeyAct.PEND.value,
-        DEN: KeyAct.DENY.value,
+        ACC: KeyAct.ACCEPT,
+        REJ: KeyAct.REJECT,
+        PEND: KeyAct.PEND,
+        DEN: KeyAct.DENY,
     }
 
     def __init__(self, opts, io_loop=None):
@@ -970,7 +970,7 @@ class Key:
 
                 eload = {
                     "result": True,
-                    "act": KeyAct(self.ACT_MAP[to_state]).value,
+                    "act": self.ACT_MAP[to_state].value,
                     "id": keyname,
                 }
                 # Cluster masters: include the public key body so peer

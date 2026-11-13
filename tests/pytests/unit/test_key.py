@@ -134,8 +134,8 @@ def test_receiver_handles_every_key_act():
     Every ``KeyAct`` must be dispatched by ``_apply_peer_key_change``, and
     every act ``Key`` can send must be a ``KeyAct``.
     """
-    sendable = set(salt.key.Key.ACT_MAP.values()) | {salt.key.KeyAct.DELETE.value}
-    assert sendable <= {a.value for a in salt.key.KeyAct}
+    sendable = set(salt.key.Key.ACT_MAP.values()) | {salt.key.KeyAct.DELETE}
+    assert sendable <= set(salt.key.KeyAct)
 
     monitor = salt.master.EventMonitor(
         {"keys.cache_driver": "localfs_key"}, ipc_publisher=None, channels=[]

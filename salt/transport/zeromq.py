@@ -2090,7 +2090,7 @@ class PublishServer(salt.transport.base.DaemonizedPublishServer):
         self.close()
 
 
-def _finalize_zmq_context(context):
+def _finalize_zmq_context(context, sockets=None):
     """Bounded, wedge-safe zmq.Context teardown for ``weakref.finalize``.
 
     Runs when a ``RequestClient`` (or similar owner) is garbage-collected
@@ -2106,18 +2106,51 @@ def _finalize_zmq_context(context):
 
     Register from a ``RequestClient``-alike via::
 
-        weakref.finalize(self, _finalize_zmq_context, self.context)
+        weakref.finalize(self, _finalize_zmq_context, self.context, self._zmq_sockets)
 
     ``weakref.finalize`` fires before the type slot ``__del__`` on the
-    referent runs and captures its own strong reference to ``context``,
-    so this callback is guaranteed to execute exactly once and to see a
-    live Context.
+    referent runs and captures its own strong references to ``context``
+    and ``sockets``, so this callback is guaranteed to execute exactly
+    once and to see a live Context.  ``sockets`` must hold every socket
+    the owner created on ``context``: ``destroy()`` does not see a socket
+    that is only reachable from an unreachable reference cycle, and
+    ``zmq_ctx_term()`` would wait for it forever.  The sockets are closed
+    here first (see ``_close_zmq_sockets``).
     """
+    _close_zmq_sockets(sockets)
     try:
         if context is not None and not context.closed:
             context.destroy(linger=1000)
     except Exception:  # pylint: disable=broad-except
         pass
+
+
+def _close_zmq_sockets(sockets):
+    """
+    Close every socket in ``sockets`` that is still open.
+
+    ``zmq_ctx_term()`` waits for every socket of the context to be closed,
+    and ``zmq.Context.destroy()`` only closes the sockets pyzmq still tracks
+    in ``Context._sockets``, a ``WeakSet``.  A socket that is only reachable
+    from an unreachable reference cycle (for example the locals of a
+    coroutine that will never resume) has already been dropped from that
+    set when the finalizer runs, so ``destroy()`` has nothing to close and
+    blocks in ``zmq_ctx_term()`` forever.  The owner therefore keeps its own
+    strong list of sockets and hands it to the finalizer.
+    """
+    for sock in list(sockets or ()):
+        try:
+            if sock.closed:
+                continue
+            sock.close(linger=0)
+        except Exception:  # pylint: disable=broad-except
+            # A zmq.asyncio socket also talks to its event loop when it is
+            # closed, and the loop may already be gone.  Close the
+            # underlying libzmq socket directly so the context can end.
+            try:
+                zmq.Socket.close(sock, linger=0)
+            except Exception:  # pylint: disable=broad-except
+                pass
 
 
 class RequestClient(salt.transport.base.RequestClient):
@@ -2136,6 +2169,11 @@ class RequestClient(salt.transport.base.RequestClient):
         else:
             self.io_loop = salt.utils.asynchronous.aioloop(io_loop)
         self.context = None
+        # Every REQ socket created on ``self.context`` that may still be
+        # open.  Handed to ``_finalize_zmq_context`` so the finalizer can
+        # close a socket that ``close_async`` already detached from
+        # ``self.socket`` but never got to close.
+        self._zmq_sockets = []
         self.send_queue = []
         # mapping of message -> future
         self.send_future_map = {}
@@ -2217,9 +2255,15 @@ class RequestClient(salt.transport.base.RequestClient):
             # ``weakref.finalize`` runs a bounded ``destroy(linger=N)``
             # first, so pyzmq's ``__del__`` sees ``closed=True`` and
             # skips the wedge-prone destroy path.
-            weakref.finalize(self, _finalize_zmq_context, self.context)
+            weakref.finalize(
+                self, _finalize_zmq_context, self.context, self._zmq_sockets
+            )
 
         self.socket = self.context.socket(zmq.REQ)
+        # Forget sockets of earlier connections that were closed, then
+        # remember this one.  The finalizer holds this same list.
+        self._zmq_sockets[:] = [s for s in self._zmq_sockets if not s.closed]
+        self._zmq_sockets.append(self.socket)
         self.socket.setsockopt(zmq.LINGER, 1)
 
         # socket options

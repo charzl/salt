@@ -127,3 +127,60 @@ def test_key_cli_context_does_not_destroy_key_class_for_eauth():
 
     with key_cli:
         pass
+
+
+def test_receiver_handles_every_key_act():
+    """
+    Every ``KeyAct`` must be dispatched by ``_apply_peer_key_change``, and
+    every act ``Key`` can send must be a ``KeyAct``.
+    """
+    sendable = set(salt.key.Key.ACT_MAP.values()) | {salt.key.KeyAct.DELETE}
+    assert sendable <= set(salt.key.KeyAct)
+
+    monitor = salt.master.EventMonitor(
+        {"keys.cache_driver": "localfs_key"}, ipc_publisher=None, channels=[]
+    )
+    for act in salt.key.KeyAct:
+        with patch("salt.cache.Cache", autospec=True), patch.object(
+            salt.master.log, "warning"
+        ) as warning:
+            monitor._apply_peer_key_change(act.value, "minion", "PUB")
+        warning.assert_not_called()
+
+
+def test_unknown_peer_key_act_logs_warning():
+    monitor = salt.master.EventMonitor(
+        {"keys.cache_driver": "localfs_key"}, ipc_publisher=None, channels=[]
+    )
+    with patch("salt.cache.Cache", autospec=True) as cache_cls, patch.object(
+        salt.master.log, "warning"
+    ) as warning:
+        monitor._apply_peer_key_change("bogus", "minion", "PUB")
+    warning.assert_called_once()
+    cache_cls.return_value.store.assert_not_called()
+
+
+def test_client_key_act_map_matches_key_act_map():
+    """
+    ``ClientKey`` must fire the same short-form acts as ``Key`` (it used to
+    fire the long-form state names).
+    """
+    client = [
+        salt.key.ClientKey.ACT_MAP[s]
+        for s in (
+            salt.key.ClientKey.ACC,
+            salt.key.ClientKey.REJ,
+            salt.key.ClientKey.PEND,
+            salt.key.ClientKey.DEN,
+        )
+    ]
+    key = [
+        salt.key.Key.ACT_MAP[s]
+        for s in (
+            salt.key.Key.ACC,
+            salt.key.Key.REJ,
+            salt.key.Key.PEND,
+            salt.key.Key.DEN,
+        )
+    ]
+    assert client == key

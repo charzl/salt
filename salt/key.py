@@ -3,6 +3,7 @@ The Salt Key backend API and interface used by the CLI. The Key class can be
 used to manage salt keys directly without interfacing with the CLI.
 """
 
+import enum
 import fnmatch
 import itertools
 import logging
@@ -29,6 +30,21 @@ import salt.utils.user
 from salt.utils.decorators import cached_property
 
 log = logging.getLogger(__name__)
+
+
+class KeyAct(str, enum.Enum):
+    """
+    ``act`` values of ``salt/key`` events.
+
+    The values are the strings that have always been fired, so the event
+    format is unchanged.
+    """
+
+    ACCEPT = "accept"
+    REJECT = "reject"
+    PEND = "pend"
+    DENY = "deny"
+    DELETE = "delete"
 
 
 def get_key(opts):
@@ -493,10 +509,10 @@ class Key:
     # long-form ``DIR_MAP`` values that are stored as the local cache
     # ``state`` field.  See issue #70401.
     ACT_MAP = {
-        ACC: "accept",
-        REJ: "reject",
-        PEND: "pend",
-        DEN: "deny",
+        ACC: KeyAct.ACCEPT,
+        REJ: KeyAct.REJECT,
+        PEND: KeyAct.PEND,
+        DEN: KeyAct.DENY,
     }
 
     def __init__(self, opts, io_loop=None):
@@ -952,7 +968,11 @@ class Key:
                     key["state"] = self.DIR_MAP[to_state]
                     self.cache.store("keys", keyname, key)
 
-                eload = {"result": True, "act": self.ACT_MAP[to_state], "id": keyname}
+                eload = {
+                    "result": True,
+                    "act": self.ACT_MAP[to_state].value,
+                    "id": keyname,
+                }
                 # Cluster masters: include the public key body so peer
                 # masters can populate their local ``pki_dir/<bucket>/<id>``
                 # without a shared filesystem.  The bytes are only useful
@@ -1034,7 +1054,7 @@ class Key:
                             self.cache.flush("denied_keys", key)
                         else:
                             self.cache.flush("keys", key)
-                        eload = {"result": True, "act": "delete", "id": key}
+                        eload = {"result": True, "act": KeyAct.DELETE.value, "id": key}
                         self.event.fire_event(
                             eload, salt.utils.event.tagify(prefix="key")
                         )
@@ -1067,7 +1087,7 @@ class Key:
             for key in keys:
                 try:
                     self.cache.flush("keys", key)
-                    eload = {"result": True, "act": "delete", "id": key}
+                    eload = {"result": True, "act": KeyAct.DELETE.value, "id": key}
                     self.event.fire_event(eload, salt.utils.event.tagify(prefix="key"))
                 except OSError:
                     pass
@@ -1482,10 +1502,10 @@ class ClientKey(Key):
     }
 
     ACT_MAP = {
-        "clients": "accept",
-        "clients_rejected": "reject",
-        "clients_pre": "pend",
-        "clients_denied": "denied",
+        ACC: KeyAct.ACCEPT,
+        REJ: KeyAct.REJECT,
+        PEND: KeyAct.PEND,
+        DEN: KeyAct.DENY,
     }
 
     # Cache keys for client authentication
@@ -1612,7 +1632,12 @@ class ClientKey(Key):
                     key["state"] = self.DIR_MAP[to_state]
                     self.cache.store(self.KEYS_CACHE, keyname, key)
 
-                eload = {"result": True, "act": self.DIR_MAP[to_state], "id": keyname}
+                eload = {
+                    "result": True,
+                    "act": self.ACT_MAP[to_state].value,
+                    "id": keyname,
+                    "scope": "client",
+                }
                 self.event.fire_event(eload, salt.utils.event.tagify(prefix="key"))
 
         for key in invalid_keys:
@@ -1643,7 +1668,12 @@ class ClientKey(Key):
                         self.cache.flush(self.DENIED_CACHE, key)
                     else:
                         self.cache.flush(self.KEYS_CACHE, key)
-                    eload = {"result": True, "act": "delete", "id": key}
+                    eload = {
+                        "result": True,
+                        "act": KeyAct.DELETE.value,
+                        "id": key,
+                        "scope": "client",
+                    }
                     self.event.fire_event(eload, salt.utils.event.tagify(prefix="key"))
                 except OSError:
                     pass
@@ -1666,7 +1696,12 @@ class ClientKey(Key):
             for key in keys:
                 try:
                     self.cache.flush(self.KEYS_CACHE, key)
-                    eload = {"result": True, "act": "delete", "id": key}
+                    eload = {
+                        "result": True,
+                        "act": KeyAct.DELETE.value,
+                        "id": key,
+                        "scope": "client",
+                    }
                     self.event.fire_event(eload, salt.utils.event.tagify(prefix="key"))
                 except OSError:
                     pass

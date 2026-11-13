@@ -445,3 +445,21 @@ def test_job_new_writes_when_route_cleared():
             {"__peer_id": "m2", "jid": "anything", "minions": ["x"]},
         )
     mock_store.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "scope,expect_applied",
+    [(None, True), ("client", False), ("master", False)],
+)
+def test_peer_key_event_applied_only_for_minion_scope(scope, expect_applied):
+    """
+    Client and master key events carry a ``scope`` and must not be
+    mirrored into the minion ``keys`` bank on peers.
+    """
+    monitor = _make_monitor(_opts())
+    payload = {"__peer_id": "m2", "act": "delete", "id": "some-id"}
+    if scope:
+        payload["scope"] = scope
+    with patch.object(EventMonitor, "_apply_peer_key_change") as mock_apply:
+        _fire(monitor, "salt/key", payload)
+    assert mock_apply.called is expect_applied

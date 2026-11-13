@@ -77,6 +77,7 @@ from salt.cli.batch_async import BatchAsync, batch_async_required
 from salt.config import DEFAULT_INTERVAL
 from salt.defaults import DEFAULT_TARGET_DELIM
 from salt.exceptions import UnsupportedAlgorithm
+from salt.key import KeyAct
 from salt.transport import TRANSPORTS
 from salt.utils.cache import CacheCli
 from salt.utils.channel import iter_transport_opts
@@ -1568,7 +1569,9 @@ class EventMonitor(salt.utils.process.SignalHandlingProcess):
                 act = data.get("act")
                 minion_id = data.get("id")
                 pub = data.get("pub")
-                if minion_id and act:
+                # Only minion keys are mirrored.  Client and master key
+                # events carry a ``scope`` and live in other banks.
+                if minion_id and act and not data.get("scope"):
                     try:
                         self._apply_peer_key_change(act, minion_id, pub)
                     except Exception:  # pylint: disable=broad-except
@@ -1649,10 +1652,13 @@ class EventMonitor(salt.utils.process.SignalHandlingProcess):
             master_id,
         )
 
+    # Derived from ``Key.ACT_MAP`` so sender and receiver cannot drift.
+    # ``deny`` and ``delete`` are handled separately in
+    # ``_apply_peer_key_change``.
     _PEER_KEY_STATE = {
-        "accept": "accepted",
-        "reject": "rejected",
-        "pend": "pending",
+        act: salt.key.Key.DIR_MAP[state]
+        for state, act in salt.key.Key.ACT_MAP.items()
+        if act not in (KeyAct.DENY, KeyAct.DELETE)
     }
 
     def _delegate_on_miss(self, data_type, key, write_kind, payload):
@@ -1732,8 +1738,17 @@ class EventMonitor(salt.utils.process.SignalHandlingProcess):
         ``act`` is one of accept/reject/pend/deny/delete; ``pub`` is the
         public key PEM (None for ``delete``).
         """
+        try:
+            act = KeyAct(act)
+        except ValueError:
+            log.warning(
+                "Ignoring peer key change for minion %s: unknown act %r",
+                minion_id,
+                act,
+            )
+            return
         cache = salt.cache.Cache(self.opts, driver=self.opts["keys.cache_driver"])
-        if act == "delete":
+        if act == KeyAct.DELETE:
             try:
                 cache.flush("keys", minion_id)
             except Exception:  # pylint: disable=broad-except
@@ -1748,17 +1763,22 @@ class EventMonitor(salt.utils.process.SignalHandlingProcess):
             return
         if not pub:
             return
-        if act == "deny":
+        if act == KeyAct.DENY:
             cache.store("denied_keys", minion_id, [pub])
             log.info("Applied peer key change: deny minion %s", minion_id)
             return
         state = self._PEER_KEY_STATE.get(act)
         if state is None:
+            log.warning(
+                "Ignoring peer key change for minion %s: unhandled act %r",
+                minion_id,
+                act.value,
+            )
             return
         cache.store("keys", minion_id, {"state": state, "pub": pub})
         log.info(
             "Applied peer key change: %s minion %s (state=%s)",
-            act,
+            act.value,
             minion_id,
             state,
         )
@@ -4924,7 +4944,7 @@ class AuthFuncs(TransportMethods):
             await self.event.fire_event_async(
                 {
                     "result": True,
-                    "act": "accept",
+                    "act": KeyAct.ACCEPT.value,
                     "id": load["id"],
                     "pub": load["pub"],
                 },
@@ -5493,7 +5513,7 @@ class AuthFuncs(TransportMethods):
             self.event.fire_event(
                 {
                     "result": True,
-                    "act": "accept",
+                    "act": KeyAct.ACCEPT.value,
                     "id": load["id"],
                     "pub": load["pub"],
                 },

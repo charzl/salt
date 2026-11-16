@@ -10,6 +10,7 @@ import sys
 import weakref
 
 import salt._logging
+import salt._logging.redact
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +78,12 @@ class ExcInfoOnLogLevelFormatMixin:
     """
 
     def format(self, record):
+        """
+        Format the log record, then redact the registered pillar values from it
+        """
+        return salt._logging.redact.redact(self._format_record(record))
+
+    def _format_record(self, record):
         """
         Format the log record to include exc_info if the handler is enabled for a specific log level
         """

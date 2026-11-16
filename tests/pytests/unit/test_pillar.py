@@ -14,6 +14,7 @@ import textwrap
 
 import pytest
 
+import salt._logging.redact
 import salt.config
 import salt.exceptions
 import salt.fileclient
@@ -1079,6 +1080,53 @@ def test_relative_include(tmp_path):
     assert compiled_pillar["mojo"] == "bad risin'"
 
 
+@pytest.mark.parametrize(
+    "role,flag,registered",
+    [
+        ("minion", True, True),
+        ("minion", False, False),
+        ("master", True, False),
+        ("syndic", True, False),
+    ],
+)
+def test_local_pillar_registers_values_for_log_redaction(
+    tmp_path, redaction, role, flag, registered
+):
+    """
+    A process that uses the pillar itself registers it, a master that compiles
+    the pillar of every minion does not.
+    """
+    (tmp_path / "top.sls").write_text("base:\n  '*':\n    - secret\n")
+    (tmp_path / "secret.sls").write_text("password: hunter2-secret\n")
+    opts = {
+        "optimization_order": [0, 1, 2],
+        "renderer": "yaml",
+        "renderer_blacklist": [],
+        "renderer_whitelist": [],
+        "state_top": "top.sls",
+        "pillar_roots": {"base": [str(tmp_path)]},
+        "extension_modules": "",
+        "saltenv": "base",
+        "file_roots": [],
+        "file_ignore_regex": None,
+        "file_ignore_glob": None,
+        "fileserver_backend": "roots",
+        "cachedir": "",
+        "__role": role,
+        "pillar_mask_output": flag,
+    }
+    pillar = salt.pillar.Pillar(opts, {"os": "Ubuntu"}, "minion", "base")
+    pillar.matchers["confirm_top.confirm_top"] = lambda *x, **y: True
+
+    compiled = pillar.compile_pillar()
+
+    assert compiled["password"] == "hunter2-secret"
+    assert type(compiled) is dict
+    assert redaction.redact("pw hunter2-secret") == (
+        "pw **********" if registered else "pw hunter2-secret"
+    )
+
+
 def test_missing_include(tmp_path):
     opts = {
         "optimization_order": [0, 1, 2],
@@ -1421,8 +1469,19 @@ def test_compile_pillar_disk_cache(master_opts, grains):
         store_mock.assert_has_calls(expected_stores, any_order=False)
 
 
+@pytest.fixture
+def redaction():
+    salt._logging.redact.clear()
+    try:
+        yield salt._logging.redact
+    finally:
+        salt._logging.redact.clear()
+
+
 @pytest.mark.parametrize("flag", [True, False])
-def test_remote_pillar_wraps_only_when_masking_enabled(grains, tmp_pki, flag):
+def test_remote_pillar_registers_values_only_when_masking_enabled(
+    grains, tmp_pki, redaction, flag
+):
     opts = salt.config.minion_config(None)
     opts.update(
         {
@@ -1443,17 +1502,19 @@ def test_remote_pillar_wraps_only_when_masking_enabled(grains, tmp_pki, flag):
     )
     ret = pillar.compile_pillar()
     pillar.destroy()
+    # The pillar is never wrapped, so reading and printing it give real values.
     assert ret == {"password": "hunter2"}
-    assert isinstance(ret, salt.utils.secret.MaskedDict) is flag
-    assert ("hunter2" not in repr(ret)) is flag
-    assert ("hunter2" not in str(ret)) is flag
-    assert salt.utils.secret.mask_output(ret) == {
-        "password": "**********" if flag else "hunter2"
-    }
+    assert type(ret) is dict
+    assert "hunter2" in repr(ret)
+    assert redaction.redact("login hunter2") == (
+        "login **********" if flag else "login hunter2"
+    )
 
 
 @pytest.mark.parametrize("flag", [True, False])
-async def test_async_remote_pillar_wraps_only_when_masking_enabled(grains, flag):
+async def test_async_remote_pillar_registers_values_only_when_masking_enabled(
+    grains, redaction, flag
+):
     opts = salt.config.minion_config(None)
     opts["pillar_mask_output"] = flag
     channel = MagicMock()
@@ -1467,12 +1528,11 @@ async def test_async_remote_pillar_wraps_only_when_masking_enabled(grains, flag)
         ret = await pillar.compile_pillar()
     finally:
         await pillar.aclose()
-    assert isinstance(ret, salt.utils.secret.MaskedDict) is flag
-    assert ("hunter2" not in repr(ret)) is flag
-    assert ("hunter2" not in str(ret)) is flag
-    assert salt.utils.secret.mask_output(ret) == {
-        "password": "**********" if flag else "hunter2"
-    }
+    assert ret == {"password": "hunter2"}
+    assert type(ret) is dict
+    assert redaction.redact("login hunter2") == (
+        "login **********" if flag else "login hunter2"
+    )
 
 
 def test_remote_pillar_bad_return(grains, tmp_pki):

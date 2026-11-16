@@ -168,17 +168,18 @@ def compiled_pillar():
 
 
 @pytest.mark.parametrize("unmask", [None, True, False])
+@pytest.mark.parametrize("flag", [False, True])
 @pytest.mark.usefixtures("compiled_pillar")
-def test_pillar_functions_return_real_values_with_masking_off(unmask):
+def test_pillar_functions_always_return_real_plain_values(flag, unmask):
     """
-    With ``pillar_mask_output`` off, ``unmask`` has no effect and the functions
-    return plain real values.
+    ``pillar_mask_output`` only redacts log output, so the functions return the
+    same plain values for either setting, and ``unmask`` has no effect.
     """
     opts = {
         "id": "minion",
         "saltenv": "base",
         "pillarenv": None,
-        "pillar_mask_output": False,
+        "pillar_mask_output": flag,
     }
     with patch.dict(pillarmod.__opts__, opts):
         results = [
@@ -192,34 +193,6 @@ def test_pillar_functions_return_real_values_with_masking_off(unmask):
         assert result == {"pin": 1234}
         assert type(result) is dict
         assert "1234" in repr(result)
-
-
-@pytest.mark.parametrize("unmask", [None, True, False])
-@pytest.mark.usefixtures("compiled_pillar")
-def test_pillar_functions_return_real_values_with_masking_on(unmask):
-    """
-    With ``pillar_mask_output`` on, ``unmask`` still has no effect. Values read
-    from the result are real, only the output of the container is redacted.
-    """
-    opts = {
-        "id": "minion",
-        "saltenv": "base",
-        "pillarenv": None,
-        "pillar_mask_output": True,
-    }
-    with patch.dict(pillarmod.__opts__, opts):
-        results = [
-            pillarmod.items(unmask=unmask),
-            pillarmod.item("pin", unmask=unmask),
-            pillarmod.ext({"libvirt": "_"}, unmask=unmask),
-            pillarmod.raw(unmask=unmask),
-        ]
-        assert pillarmod.get("pin", unmask=unmask) == 1234
-    for result in results:
-        assert isinstance(result, secret.MaskedDict)
-        assert result == {"pin": 1234}
-        assert "1234" not in repr(result)
-        assert "1234" not in str(result)
 
 
 def test_pillar_mask_output_defaults_to_false():
@@ -378,18 +351,13 @@ def test_raw_default_returns_unmasked_values():
         assert pillarmod.raw(key="secret") == "swordfish"
 
 
-def test_raw_returns_masked_container_when_masking_is_on():
-    """With masking on, ``pillar.raw`` returns real values in a container that
-    is redacted on output."""
+def test_raw_returns_real_values_when_masking_is_on():
     with patch.dict(pillarmod.__pillar__, {"secret": "swordfish"}), patch.dict(
         pillarmod.__opts__, {"pillar_mask_output": True}
     ):
-        value = pillarmod.raw(unmask=False)
-        assert value["secret"] == "swordfish"
-        assert "swordfish" not in repr(value)
-        assert secret.mask_output(value) == {"secret": secret.REDACT_PLACEHOLDER}
-        # A single value is a plain string.
-        assert pillarmod.raw(key="secret", unmask=False) == "swordfish"
+        for unmask in (None, True, False):
+            assert pillarmod.raw(unmask=unmask) == {"secret": "swordfish"}
+            assert pillarmod.raw(key="secret", unmask=unmask) == "swordfish"
 
 
 def test_ext_ignores_unmask():

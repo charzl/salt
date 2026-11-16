@@ -25,16 +25,9 @@ log = logging.getLogger(__name__)
 
 def _pillar_result(value):
     """
-    Return the real pillar values.
-
-    With ``pillar_mask_output`` enabled the containers are wrapped, so they
-    still read as plain data but are redacted wherever they are printed or
-    returned (see :py:func:`salt.utils.secret.mask_output`).
+    Return the real pillar values, as plain data.
     """
-    value = secret.expose(value)
-    if __opts__.get("pillar_mask_output", False):
-        return secret.hide(value)
-    return value
+    return secret.expose(value)
 
 
 def get(

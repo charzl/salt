@@ -5209,35 +5209,37 @@ Recursively merge lists by aggregating them instead of replacing them.
 
 Default: ``False``
 
-Feature flag for pillar masking.
+Redact pillar values from log output.
 
-When ``False`` (the default), pillar is never masked. The ``pillar`` execution
-module functions (``get``, ``item``, ``items``, ``raw``, ``ext`` and the others)
-return the real values, received pillar containers are plain dicts and lists,
-and ``repr()`` and ``str()`` show real values.
+When ``False`` (the default), logging is unchanged.
 
-When ``True``, the values are still real when read, but pillar containers
-are redacted (``**********``) where they are output: the job return of a
-minion, ``salt-call`` and other CLI output, and ``repr()``, ``str()`` and
-logging. A single value that a function returns by itself, such as the result of
-``pillar.get password``, is a plain string and is not redacted.
+When ``True``, the pillar a process receives is registered, and every value in
+it that is a string of at least four characters is replaced by ``**********``
+in the log output of Salt's log handlers: the console, log files and syslog,
+including the traceback of logged exceptions. It does not matter how the value
+got into the message, whether inside a printed pillar dictionary, a command
+line or a diff. Numbers, booleans and shorter strings are not redacted, because
+they would also match ordinary text. A value that is also ordinary text, such
+as a user name, is redacted everywhere it appears in the log.
 
-The ``unmask`` argument of the ``pillar`` functions has no effect with either
-setting and is kept for compatibility.
+Only the log output changes. The ``pillar`` functions, job returns and the
+output of the CLI always contain the real values, and the ``unmask`` argument of
+the ``pillar`` functions has no effect. Handlers that are not Salt's own, such
+as the :ref:`external log handlers <external-logging-handlers>`, are not covered.
 
 .. versionchanged:: 3008.4
-    The default is now ``False``. Before, the default was ``True``, and masked
-    values were returned by the ``pillar`` functions unless ``unmask=True`` was
-    passed.
+    The default is now ``False`` and the option only affects log output. Before,
+    the default was ``True``, and the ``pillar`` functions returned masked
+    values unless ``unmask=True`` was passed.
 
 This option does **not** change ``no_log``. It is an explicit per-state
 setting rather than pillar masking, so a state with ``no_log: True`` still has
 its ``name``, ``comment`` and ``changes`` redacted.
 
 The option is read by the process that runs the code, so set it in the
-:conf_minion:`minion <pillar_mask_output>` configuration for the minions. The
-master setting only applies to what the master itself runs, such as salt-ssh,
-where the job return is not redacted.
+:conf_minion:`minion <pillar_mask_output>` configuration for the minions. A
+master does not register the pillar it compiles for minions, so this option
+does not redact the master's own logs.
 
 .. code-block:: yaml
 

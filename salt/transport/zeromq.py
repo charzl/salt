@@ -2470,6 +2470,18 @@ class RequestClient(salt.transport.base.RequestClient):
         self.socket = None
         self.context = None
         self._send_recv_exit_future = None
+        # Close the socket before the first ``await``.  The socket is no
+        # longer reachable from ``self`` here, so if this coroutine is
+        # suspended at the ``await`` below and its loop goes away, nothing
+        # could close it and ``zmq_ctx_term()`` would later wait for it
+        # forever.  ``_send_recv`` sees the closed socket as a ``ZMQError``
+        # or a cancelled poll and, with ``_closing`` set, exits without
+        # reconnecting.
+        if socket is not None:
+            try:
+                socket.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
         if exit_future is not None:
             try:
                 await asyncio.wait_for(asyncio.shield(exit_future), timeout=5)
@@ -2477,11 +2489,6 @@ class RequestClient(salt.transport.base.RequestClient):
                 pass
             except Exception:  # pylint: disable=broad-except
                 log.debug("RequestClient graceful drain failed", exc_info=True)
-        if socket is not None:
-            try:
-                socket.close()
-            except Exception:  # pylint: disable=broad-except
-                pass
         if context is not None and not context.closed:
             try:
                 context.destroy(linger=1000)

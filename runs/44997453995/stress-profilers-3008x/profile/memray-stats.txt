@@ -1,0 +1,59 @@
+
+📏 Total allocations:
+	343217
+
+📦 Total memory allocated:
+	3.050GB
+
+📈 Peak memory usage:
+	8.889MB
+
+📊 Histogram of allocation size:
+	min: 1.000B
+	---------------------------------------------
+	< 4.000B   :  26243 ▇▇▇▇▇
+	< 18.000B  :  10422 ▇▇
+	< 82.000B  :  55972 ▇▇▇▇▇▇▇▇▇
+	< 359.000B :  46519 ▇▇▇▇▇▇▇▇
+	< 1.565kB  : 160508 ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+	< 6.816kB  :  22516 ▇▇▇▇
+	< 29.682kB :   6855 ▇▇
+	< 129.249kB:   5088 ▇
+	< 562.803kB:   8265 ▇▇
+	<=2.451MB  :    829 ▇
+	---------------------------------------------
+	max: 2.451MB
+
+📂 Allocator type distribution:
+	 MALLOC: 302256
+	 REALLOC: 20006
+	 CALLOC: 19859
+	 MMAP: 1096
+
+🥇 Top 5 largest allocating locations (by size):
+	- packb:/usr/local/lib/python3.14/site-packages/msgpack/__init__.py:36 -> 1.598GB
+	- fopen:/app/salt/utils/files.py:617 -> 260.373MB
+	- _decode_embedded_dict:/app/salt/transport/frame.py:77 -> 124.119MB
+	- _refresh_file_mapping:/app/salt/loader/lazy.py:822 -> 113.938MB
+	- open:/usr/local/lib/python3.14/pathlib/__init__.py:771 -> 113.591MB
+
+🥇 Top 5 largest allocating locations (by number of allocations):
+	- _refresh_file_mapping:/app/salt/loader/lazy.py:822 -> 104148
+	- digest:/usr/local/lib/python3.14/hmac.py:199 -> 19152
+	- _init_openssl_hmac:/usr/local/lib/python3.14/hmac.py:116 -> 19152
+	- sub:/usr/local/lib/python3.14/re/__init__.py:208 -> 18472
+	- __forward_code__:/usr/local/lib/python3.14/annotationlib.py:287 -> 17504
+
+🥇 Top 5 allocating modules (by size):
+	- msgpack: 1.658GB total | 6809 allocations
+	- lazy: 299.913MB total | 134604 allocations
+	- files: 260.374MB total | 5236 allocations
+	- crypt: 185.936MB total | 51685 allocations
+	- frame: 155.985MB total | 2740 allocations
+
+🥇 Top 5 allocating modules (by number of allocations):
+	- lazy: 299.913MB total | 134604 allocations
+	- crypt: 185.936MB total | 51685 allocations
+	- entrypoints: 139.065MB total | 32148 allocations
+	- tornado: 89.952MB total | 26569 allocations
+	- rsax931: 3.685MB total | 13744 allocations

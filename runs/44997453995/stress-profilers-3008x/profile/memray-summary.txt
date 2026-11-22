@@ -1,0 +1,40 @@
+
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃                                     ┃        ┃ Total ┃       ┃   Own ┃       ┃
+┃                                     ┃ <Total ┃ Memo… ┃   Own ┃ Memo… ┃ Allo… ┃
+┃ Location                            ┃ Memor… ┃     % ┃ Memo… ┃     % ┃ Count ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ <unknown> at <unknown>              │ 8.887… │ 99.9… │ 18.1… │ 0.20% │   294 │
+│ _PyEval_Vector at Python/ceval.c    │ 8.870… │ 99.7… │ 0.00… │ 0.00% │   295 │
+│ _PyObject_VectorcallTstate at       │ 8.868… │ 99.7… │ 0.00… │ 0.00% │   293 │
+│ ./Include/internal/pycore_call.h    │        │       │       │       │       │
+│ _PyEval_EvalFrame at                │ 8.853… │ 99.6… │ 0.00… │ 0.00% │   294 │
+│ ./Include/internal/pycore_ceval.h   │        │       │       │       │       │
+│ context_run at Python/context.c     │ 8.852… │ 99.5… │ 0.00… │ 0.00% │   292 │
+│ _PyObject_Malloc at                 │ 8.836… │ 99.4… │ 7.78… │ 87.6… │   277 │
+│ Objects/obmalloc.c                  │        │       │       │       │       │
+│ request_handler at                  │ 8.781… │ 98.7… │ 0.00… │ 0.00% │   215 │
+│ /app/salt/transport/zeromq.py       │        │       │       │       │       │
+│ gen_send_ex2 at Objects/genobject.c │ 8.781… │ 98.7… │ 0.00… │ 0.00% │   215 │
+│ task_step_impl at                   │ 8.781… │ 98.7… │ 0.00… │ 0.00% │   215 │
+│ ./Modules/_asynciomodule.c          │        │       │       │       │       │
+│ task_step at                        │ 8.781… │ 98.7… │ 0.00… │ 0.00% │   215 │
+│ ./Modules/_asynciomodule.c          │        │       │       │       │       │
+│ _run at                             │ 8.781… │ 98.7… │ 0.00… │ 0.00% │   215 │
+│ /usr/local/lib/python3.14/asyncio/… │        │       │       │       │       │
+│ _run_once at                        │ 8.781… │ 98.7… │ 0.00… │ 0.00% │   215 │
+│ /usr/local/lib/python3.14/asyncio/… │        │       │       │       │       │
+│ run_forever at                      │ 8.781… │ 98.7… │ 0.00… │ 0.00% │   215 │
+│ /usr/local/lib/python3.14/asyncio/… │        │       │       │       │       │
+│ __bind at /app/salt/master.py       │ 8.781… │ 98.7… │ 0.00… │ 0.00% │   215 │
+│ run at /app/salt/master.py          │ 8.781… │ 98.7… │ 0.00… │ 0.00% │   215 │
+│ wrapped_run_func at                 │ 8.781… │ 98.7… │ 0.00… │ 0.00% │   215 │
+│ /app/salt/utils/process.py          │        │       │       │       │       │
+│ _bootstrap at                       │ 8.781… │ 98.7… │ 0.00… │ 0.00% │   215 │
+│ /usr/local/lib/python3.14/multipro… │        │       │       │       │       │
+│ _launch at                          │ 8.781… │ 98.7… │ 0.00… │ 0.00% │   215 │
+│ /usr/local/lib/python3.14/multipro… │        │       │       │       │       │
+│ __init__ at                         │ 8.781… │ 98.7… │ 0.00… │ 0.00% │   215 │
+│ /usr/local/lib/python3.14/multipro… │        │       │       │       │       │
+└─────────────────────────────────────┴────────┴───────┴───────┴───────┴───────┘

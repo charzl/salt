@@ -1,0 +1,23 @@
+[2026-11-22T07:20:21Z] profiler=memray target=mworker delay=600s duration=600s python=Python 3.14.10
+[2026-11-22T07:30:21Z] pid=53 cmdline=/usr/local/bin/python3.14 /usr/local/bin/salt-master -d RequestServer MWorker-default-0 
+[2026-11-22T07:30:21Z] VmRSS before: 89140 kB
+memray: tracking PID 53 for 600s in the background. Run `memray detach 53` to stop early.
+
+
+Wrote /tmp/profile/memray-leaks.html
+
+
+Wrote /tmp/profile/memray-flamegraph.html
+[2026-11-22T07:40:42Z] profiler exit status: 0
+[2026-11-22T07:40:42Z] VmRSS after: 103184 kB
+total 2188
+drwxr-xr-x 2 root root    4096 Nov 22 07:40 .
+drwxrwxrwt 1 root root    4096 Nov 22 07:30 ..
+-rw-r--r-- 1 root root       2 Nov 22 07:40 exit_code
+-rw-r--r-- 1 root root  489042 Nov 22 07:40 memray-flamegraph.html
+-rw-r--r-- 1 root root  485687 Nov 22 07:40 memray-leaks.html
+-rw-r--r-- 1 root root    2113 Nov 22 07:40 memray-stats.txt
+-rw-r--r-- 1 root root    4188 Nov 22 07:40 memray-summary.txt
+-rw-r--r-- 1 root root 1230759 Nov 22 07:40 memray.bin
+-rw-r--r-- 1 root root     540 Nov 22 07:40 profile.log
+[2026-11-22T07:40:42Z] done

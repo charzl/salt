@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import math
 import os
 import re
 import sys
@@ -298,7 +299,7 @@ def flamegraph_svg(stacks, title, unit_label, width=1200, row=17, max_depth=48):
             f"{node['count']:,} allocations"
         )
         label = ""
-        room = int(pixels / 6.3) - 1
+        room = int(pixels / 6.9) - 1
         if room >= 4:
             text = (
                 node["name"]
@@ -328,10 +329,13 @@ def line_chart_svg(series, title, y_label, width=900, height=300):
         return None
     x_max = max(x for x, _ in points) or 1.0
     y_min = min(0.0, min(y for _, y in points))
-    y_max = max(y for _, y in points)
-    if y_max <= y_min:
-        y_max = y_min + 1.0
-    y_max *= 1.05
+    y_top = max(y for _, y in points)
+    if y_top <= y_min:
+        y_top = y_min + 1.0
+    y_step = nice_step(y_top - y_min)
+    y_max = math.ceil(y_top / y_step) * y_step
+    x_step = nice_step(x_max)
+    x_decimals = 0 if x_step >= 1 else 1
 
     def px(value):
         return left + (width - left - right) * value / x_max
@@ -345,20 +349,22 @@ def line_chart_svg(series, title, y_label, width=900, height=300):
         f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
         f'<text x="6" y="16" font-size="13" font-weight="bold">{html.escape(title)}</text>',
     ]
-    for step in range(0, 6):
-        value = y_min + (y_max - y_min) * step / 5
+    value = y_min
+    while value <= y_max + y_step / 1000:
         parts.append(
             f'<line x1="{left}" x2="{width - right}" y1="{py(value):.1f}" y2="{py(value):.1f}" '
             'stroke="#e5e7eb"/>'
             f'<text x="{left - 6}" y="{py(value) + 4:.1f}" text-anchor="end" fill="#555555">'
-            f"{value:.0f}</text>"
+            f"{value:g}</text>"
         )
-    for step in range(0, 6):
-        value = x_max * step / 5
+        value += y_step
+    value = 0.0
+    while value <= x_max + x_step / 1000:
         parts.append(
             f'<text x="{px(value):.1f}" y="{height - 14}" text-anchor="middle" fill="#555555">'
-            f"{value:.0f} min</text>"
+            f"{value:.{x_decimals}f} min</text>"
         )
+        value += x_step
     parts.append(
         f'<text x="14" y="{top + (height - top - bottom) / 2:.0f}" fill="#555555" '
         f'transform="rotate(-90 14 {top + (height - top - bottom) / 2:.0f})" '
@@ -369,7 +375,7 @@ def line_chart_svg(series, title, y_label, width=900, height=300):
         parts.append(
             f'<polyline fill="none" stroke="{colour}" stroke-width="2" points="{path}"/>'
         )
-        legend_x = left + 8 + index * 190
+        legend_x = left + 8 + index * 300
         parts.append(
             f'<line x1="{legend_x}" x2="{legend_x + 18}" y1="28" y2="28" stroke="{colour}" '
             'stroke-width="3"/>'
@@ -377,6 +383,16 @@ def line_chart_svg(series, title, y_label, width=900, height=300):
         )
     parts.append("</svg>")
     return "\n".join(parts)
+
+
+def nice_step(span, ticks=5):
+    """A step of 1, 2 or 5 times a power of ten that gives about ``ticks`` ticks."""
+    raw = span / ticks
+    magnitude = 10 ** math.floor(math.log10(raw))
+    for factor in (1, 2, 5, 10):
+        if raw <= factor * magnitude:
+            return factor * magnitude
+    return 10 * magnitude
 
 
 def linear_fit(points):

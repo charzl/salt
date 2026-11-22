@@ -300,23 +300,6 @@ jobs:
           mkdir -p artifacts/profile
           docker cp "$CONTAINER":/tmp/profile/. artifacts/profile/
           ls -la artifacts/profile
-          {
-            echo "### Profile (${{ github.event.inputs.profiler }}, ${PROFILE_TARGET})"
-            echo
-            echo "Exit status: \`$(cat artifacts/profile/exit_code 2>/dev/null || echo unknown)\`."
-            echo "Files are in the \`profile\` folder of the uploaded artifact:"
-            echo
-            for file in artifacts/profile/*; do
-              echo "- \`${file##*/}\`"
-            done
-            echo
-            echo '<details><summary>profile.log</summary>'
-            echo
-            echo '```'
-            tail -n 40 artifacts/profile/profile.log 2>/dev/null
-            echo '```'
-            echo '</details>'
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Snapshot Metrics
         if: always()
@@ -353,7 +336,7 @@ jobs:
         # auto-pruned 14 days back so it stays small.  Skipped silently
         # when no PNGs exist (e.g. early-stage failures).
         id: publish-snapshots
-        if: always() && hashFiles('artifacts/panels/*.png') != ''
+        if: always() && (hashFiles('artifacts/panels/*.png') != '' || hashFiles('artifacts/profile/*') != '')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -373,7 +356,19 @@ jobs:
           fi
 
           mkdir -p "snaps/$RUN_DIR"
-          cp artifacts/panels/*.png "snaps/$RUN_DIR/"
+          if compgen -G 'artifacts/panels/*.png' > /dev/null; then
+            cp artifacts/panels/*.png "snaps/$RUN_DIR/"
+          fi
+          # Profiler output that can be read in the summary: SVG flamegraphs
+          # (shown as images) and text.  raw.githubusercontent.com serves HTML
+          # as text/plain, so the HTML flamegraphs and the large raw captures
+          # stay in the uploaded artifact only.
+          if [ -d artifacts/profile ]; then
+            mkdir -p "snaps/$RUN_DIR/profile"
+            find artifacts/profile -maxdepth 1 -type f \
+              \( -name '*.svg' -o -name '*.txt' -o -name '*.log' \) -size -5120k \
+              -exec cp {} "snaps/$RUN_DIR/profile/" \;
+          fi
 
           cd snaps
           # Drop any run directory older than 14 days so the branch
@@ -418,3 +413,63 @@ jobs:
               --artifact-name stress-test-results-${{ github.ref_name }} \
               --artifact-url "${{ steps.upload-artifacts.outputs.artifact-url }}" \
               --image-url-prefix "${{ steps.publish-snapshots.outputs.url-prefix }}"
+
+      - name: Profile Summary
+        # After ``Publish panels``, so the SVG flamegraph can be embedded
+        # from the stress-snapshots branch.  The summary shows what can be
+        # read inline.  The HTML flamegraphs (memray) and the raw captures
+        # are in the uploaded artifact, in the ``profile`` folder.
+        if: always() && github.event.inputs.profiler != '' && github.event.inputs.profiler != 'none'
+        continue-on-error: true
+        env:
+          PROFILER: ${{ github.event.inputs.profiler }}
+          PROFILE_TARGET: ${{ github.event.inputs.profile_target || 'master' }}
+          URL_PREFIX: ${{ steps.publish-snapshots.outputs.url-prefix }}
+          ARTIFACT_URL: ${{ steps.upload-artifacts.outputs.artifact-url }}
+        run: |
+          dir=artifacts/profile
+          {
+            echo "### Profile: ${PROFILER} on ${PROFILE_TARGET}"
+            echo
+            echo "Exit status: \`$(cat "$dir/exit_code" 2>/dev/null || echo unknown)\`."
+            if [ -n "$ARTIFACT_URL" ]; then
+              echo "Everything, including the HTML flamegraphs and the raw capture, is in the \`profile\` folder of [the artifact]($ARTIFACT_URL)."
+            fi
+            echo
+
+            if [ -s "$dir/pyspy-flamegraph.svg" ] && [ -n "$URL_PREFIX" ]; then
+              echo "![py-spy flamegraph](${URL_PREFIX}profile/pyspy-flamegraph.svg)"
+              echo
+            fi
+
+            for name in memray-summary.txt memray-stats.txt pyspy-dump.txt; do
+              if [ -s "$dir/$name" ]; then
+                echo "<details open><summary>$name</summary>"
+                echo
+                echo '```'
+                head -n 40 "$dir/$name"
+                echo '```'
+                echo '</details>'
+                echo
+              fi
+            done
+
+            if [ -s "$dir/austin.austin" ]; then
+              echo "<details open><summary>austin: leaf frames by time</summary>"
+              echo
+              echo '```'
+              grep -v '^#' "$dir/austin.austin" \
+                | awk 'NF > 1 { n = $NF; $NF = ""; c = split($0, frames, ";"); sum[frames[c]] += n } END { for (f in sum) print sum[f], f }' \
+                | sort -rn | head -n 20
+              echo '```'
+              echo '</details>'
+              echo
+            fi
+
+            echo '<details><summary>profile.log</summary>'
+            echo
+            echo '```'
+            tail -n 40 "$dir/profile.log" 2>/dev/null
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"

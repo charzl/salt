@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import argparse
 import html
+import os
 import re
 import sys
 import traceback
+import zlib
 from collections import defaultdict
 
 TOP = 12
@@ -239,6 +241,163 @@ def python_frame(frames):
     return None
 
 
+def _rgb(name):
+    """A stable warm colour per function name, like a flamegraph."""
+    key = zlib.crc32(name.encode("utf-8"))
+    red = 205 + key % 50
+    green = 60 + (key >> 8) % 140
+    blue = (key >> 16) % 55
+    return f"rgb({red},{green},{blue})"
+
+
+def flamegraph_svg(stacks, title, unit_label, width=1200, row=17, max_depth=48):
+    """
+    A static flamegraph as SVG, root on top, from ``[(frames, weight, count)]``
+    with ``frames`` ordered root first.  GitHub shows an SVG as an image and
+    does not run scripts in it, so there is no zoom; every box has a tooltip
+    when the file is opened on its own.
+    """
+    root = {"name": "all", "value": 0, "count": 0, "children": {}}
+    for frames, weight, count in stacks:
+        node = root
+        node["value"] += weight
+        node["count"] += count
+        for name in frames[:max_depth]:
+            node = node["children"].setdefault(
+                name, {"name": name, "value": 0, "count": 0, "children": {}}
+            )
+            node["value"] += weight
+            node["count"] += count
+    total = root["value"] or 1
+    boxes = []
+
+    def place(node, left, depth):
+        pixels = width * node["value"] / total
+        if pixels >= 0.4:
+            boxes.append((node, left, pixels, depth))
+        offset = left
+        for child in sorted(node["children"].values(), key=lambda c: c["name"]):
+            place(child, offset, depth + 1)
+            offset += width * child["value"] / total
+
+    place(root, 0.0, 0)
+    height = (max(box[3] for box in boxes) + 1) * row + 44
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" font-family="monospace" font-size="11">',
+        f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
+        f'<text x="6" y="16" font-size="13" font-weight="bold">{html.escape(title)}</text>',
+        f'<text x="6" y="31" fill="#555555">{html.escape(unit_label)}; '
+        "a wider box is more memory, a box sits on the function that called it</text>",
+    ]
+    for node, left, pixels, depth in boxes:
+        top = 38 + depth * row
+        share = 100.0 * node["value"] / total
+        tip = (
+            f"{node['name']} - {readable(node['value'])} ({share:.1f}%), "
+            f"{node['count']:,} allocations"
+        )
+        label = ""
+        room = int(pixels / 6.3) - 1
+        if room >= 4:
+            text = (
+                node["name"]
+                if len(node["name"]) <= room
+                else node["name"][: room - 2] + ".."
+            )
+            label = (
+                f'<text x="{left + 3:.1f}" y="{top + 12}">{html.escape(text)}</text>'
+            )
+        parts.append(
+            f"<g><title>{html.escape(tip)}</title>"
+            f'<rect x="{left:.2f}" y="{top}" width="{max(pixels - 0.6, 0.3):.2f}" '
+            f'height="{row - 1}" fill="{_rgb(node["name"])}"/>{label}</g>'
+        )
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def line_chart_svg(series, title, y_label, width=900, height=300):
+    """
+    A line chart as SVG. ``series`` is ``[(label, colour, [(minutes, value)])]``
+    with values in MB.
+    """
+    left, right, top, bottom = 62, 16, 38, 34
+    points = [point for _, _, data in series for point in data]
+    if not points:
+        return None
+    x_max = max(x for x, _ in points) or 1.0
+    y_min = min(0.0, min(y for _, y in points))
+    y_max = max(y for _, y in points)
+    if y_max <= y_min:
+        y_max = y_min + 1.0
+    y_max *= 1.05
+
+    def px(value):
+        return left + (width - left - right) * value / x_max
+
+    def py(value):
+        return top + (height - top - bottom) * (1 - (value - y_min) / (y_max - y_min))
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" font-family="sans-serif" font-size="11">',
+        f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
+        f'<text x="6" y="16" font-size="13" font-weight="bold">{html.escape(title)}</text>',
+    ]
+    for step in range(0, 6):
+        value = y_min + (y_max - y_min) * step / 5
+        parts.append(
+            f'<line x1="{left}" x2="{width - right}" y1="{py(value):.1f}" y2="{py(value):.1f}" '
+            'stroke="#e5e7eb"/>'
+            f'<text x="{left - 6}" y="{py(value) + 4:.1f}" text-anchor="end" fill="#555555">'
+            f"{value:.0f}</text>"
+        )
+    for step in range(0, 6):
+        value = x_max * step / 5
+        parts.append(
+            f'<text x="{px(value):.1f}" y="{height - 14}" text-anchor="middle" fill="#555555">'
+            f"{value:.0f} min</text>"
+        )
+    parts.append(
+        f'<text x="14" y="{top + (height - top - bottom) / 2:.0f}" fill="#555555" '
+        f'transform="rotate(-90 14 {top + (height - top - bottom) / 2:.0f})" '
+        f'text-anchor="middle">{html.escape(y_label)}</text>'
+    )
+    for index, (label, colour, data) in enumerate(series):
+        path = " ".join(f"{px(x):.1f},{py(y):.1f}" for x, y in data)
+        parts.append(
+            f'<polyline fill="none" stroke="{colour}" stroke-width="2" points="{path}"/>'
+        )
+        legend_x = left + 8 + index * 190
+        parts.append(
+            f'<line x1="{legend_x}" x2="{legend_x + 18}" y1="28" y2="28" stroke="{colour}" '
+            'stroke-width="3"/>'
+            f'<text x="{legend_x + 24}" y="32" fill="#333333">{html.escape(label)}</text>'
+        )
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def linear_fit(points):
+    """Slope per x unit and R squared of a least squares line."""
+    count = len(points)
+    if count < 3:
+        return 0.0, 0.0
+    mean_x = sum(x for x, _ in points) / count
+    mean_y = sum(y for _, y in points) / count
+    sxx = sum((x - mean_x) ** 2 for x, _ in points)
+    if not sxx:
+        return 0.0, 0.0
+    sxy = sum((x - mean_x) * (y - mean_y) for x, y in points)
+    slope = sxy / sxx
+    ss_tot = sum((y - mean_y) ** 2 for _, y in points)
+    if not ss_tot:
+        return slope, 0.0
+    ss_res = sum((y - (mean_y + slope * (x - mean_x))) ** 2 for x, y in points)
+    return slope, max(0.0, 1.0 - ss_res / ss_tot)
+
+
 def salt_caller(frames):
     """The nearest frame in Salt's own code, leaf first."""
     for frame in frames:
@@ -247,7 +406,7 @@ def salt_caller(frames):
     return None
 
 
-def memray_report(path, rss_before, rss_after):
+def memray_report(path, rss_before, rss_after, svg_dir=None):
     from memray import FileReader  # pylint: disable=import-outside-toplevel
 
     reader = FileReader(path, report_progress=False)
@@ -287,6 +446,31 @@ def memray_report(path, rss_before, rss_after):
                 "pages shared with other processes that became private, "
                 "fragmentation, or memory taken by C code that does not use malloc."
             )
+    snapshots = list(reader.get_memory_snapshots())
+    if len(snapshots) >= 3:
+        first = snapshots[0].time
+        heap = [((s.time - first) / 60000.0, s.heap / 1048576.0) for s in snapshots]
+        rss = [((s.time - first) / 60000.0, s.rss / 1048576.0) for s in snapshots]
+        rate, _ = linear_fit(heap)
+        out.append(
+            f"- The memory memray tracked (allocations made since it attached and "
+            f"not freed yet) went from {heap[0][1]:.1f} MB to {heap[-1][1]:.1f} MB "
+            f"in {heap[-1][0]:.0f} minutes, on average {rate * 1024:+.0f} kB a minute. "
+            "See `memray-heap.svg`."
+        )
+        chart = line_chart_svg(
+            [
+                ("memory tracked by memray (heap)", "#2563eb", heap),
+                ("process size (RSS)", "#b45309", rss),
+            ],
+            "Memory of the profiled process while memray was attached",
+            "MB",
+        )
+        if chart and svg_dir:
+            with open(
+                os.path.join(svg_dir, "memray-heap.svg"), "w", encoding="utf-8"
+            ) as handle:
+                handle.write(chart)
     out.append("")
 
     if not leaked:
@@ -295,6 +479,7 @@ def memray_report(path, rss_before, rss_after):
 
     by_site = defaultdict(lambda: [0, 0])
     by_salt = defaultdict(lambda: [0, 0])
+    stacks = []
     for record in leaked:
         try:
             frames = record.hybrid_stack_trace(max_stacks=24)
@@ -302,6 +487,14 @@ def memray_report(path, rss_before, rss_after):
             frames = record.stack_trace(max_stacks=24)
         if not frames:
             continue
+        python_only = [f for f in frames if (f[1] or "").endswith(".py")] or frames
+        stacks.append(
+            (
+                [frame_text(f) for f in reversed(python_only)],
+                record.size,
+                record.n_allocations,
+            )
+        )
         site = python_frame(frames) or frame_text(frames[0])
         by_site[site][0] += record.size
         by_site[site][1] += record.n_allocations
@@ -309,6 +502,18 @@ def memray_report(path, rss_before, rss_after):
         if caller:
             by_salt[caller][0] += record.size
             by_salt[caller][1] += record.n_allocations
+
+    if svg_dir and stacks:
+        with open(
+            os.path.join(svg_dir, "memray-leaks.svg"), "w", encoding="utf-8"
+        ) as handle:
+            handle.write(
+                flamegraph_svg(
+                    stacks,
+                    "Memory allocated while attached and still alive",
+                    f"{readable(live_bytes)} in {live_count:,} allocations",
+                )
+            )
 
     def table(title, note, data):
         out.append(f"### {title}")
@@ -349,8 +554,9 @@ def memray_report(path, rss_before, rss_after):
         "profile before calling it a leak."
     )
     out.append(
-        "- For the full call stacks open `memray-leaks.html` from the artifact in "
-        "a browser. The widest boxes are the biggest live allocations."
+        "- `memray-leaks.svg` is the same data as a flamegraph: the widest boxes "
+        "are the biggest live allocations. For a flamegraph you can zoom, open "
+        "`memray-leaks.html` from the artifact in a browser."
     )
     return out
 
@@ -363,12 +569,15 @@ def main():
     parser.add_argument("--rate", type=int, default=0)
     parser.add_argument("--rss-before", type=int, default=0, help="kB")
     parser.add_argument("--rss-after", type=int, default=0, help="kB")
+    parser.add_argument("--svg-dir", default="", help="write the SVG charts here")
     args = parser.parse_args()
     try:
         if args.tool == "py-spy":
             lines = pyspy_report(args.path, args.seconds, args.rate)
         else:
-            lines = memray_report(args.path, args.rss_before, args.rss_after)
+            lines = memray_report(
+                args.path, args.rss_before, args.rss_after, args.svg_dir or None
+            )
     except Exception:  # pylint: disable=broad-except
         lines = [
             f"## {args.tool}: report failed",

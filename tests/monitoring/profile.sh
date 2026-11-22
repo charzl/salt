@@ -115,9 +115,11 @@ case "$PROFILER" in
                 memray flamegraph --force -o "$OUT/memray-flamegraph.html" "$OUT/memray.bin" >>"$LOG" 2>&1
                 memray stats "$OUT/memray.bin" >"$OUT/memray-stats.txt" 2>>"$LOG"
                 memray summary "$OUT/memray.bin" >"$OUT/memray-summary.txt" 2>>"$LOG"
+                # The same data with memory over time, to zoom in a browser.
+                memray flamegraph --temporal --force -o "$OUT/memray-temporal.html" "$OUT/memray.bin" >>"$LOG" 2>&1
                 python3 /tmp/profile_report.py memray "$OUT/memray.bin" \
                     --rss-before "${RSS_BEFORE:-0}" --rss-after "$(rss_kb "$PID")" \
-                    >"$OUT/report.md" 2>>"$LOG"
+                    --svg-dir "$OUT" >"$OUT/report.md" 2>>"$LOG"
             else
                 log "memray wrote no capture file"
                 status=1

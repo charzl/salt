@@ -447,6 +447,13 @@ jobs:
               echo
             fi
 
+            for name in memray-heap.svg memray-leaks.svg; do
+              if [ -s "$dir/$name" ] && [ -n "$URL_PREFIX" ]; then
+                echo "![${name%.svg}](${URL_PREFIX}profile/$name)"
+                echo
+              fi
+            done
+
             # The report in plain words comes first.
             if [ -s "$dir/report.md" ]; then
               cat "$dir/report.md"

@@ -33,15 +33,27 @@ jobs:
           import time
 
           CACHE = []
+          SESSIONS = {}
+
+
+          def alloc_buffer(size):
+              return bytearray(size)
 
 
           def remember(size):
-              CACHE.append(bytearray(size))
+              CACHE.append(alloc_buffer(size))
+
+
+          def open_session(number):
+              SESSIONS[number] = [alloc_buffer(2_000) for _ in range(20)]
 
 
           def leaky_loop():
+              number = 0
               while True:
                   remember(50_000)
+                  open_session(number)
+                  number += 1
                   time.sleep(0.02)
 
 
@@ -71,10 +83,18 @@ jobs:
           sleep 40
           RSS_AFTER=$(awk '/^VmRSS:/ {print $2}' "/proc/$PID/status")
           kill "$PID"
+          mkdir -p /tmp/out
           ls -la /tmp/pyspy.svg /tmp/memray.bin
           {
             python tests/monitoring/profile_report.py memray /tmp/memray.bin \
-              --rss-before "$RSS_BEFORE" --rss-after "$RSS_AFTER"
+              --rss-before "$RSS_BEFORE" --rss-after "$RSS_AFTER" --svg-dir /tmp/out
             echo
             python tests/monitoring/profile_report.py py-spy /tmp/pyspy.svg --seconds 20 --rate 20
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: selftest-output
+          path: |
+            /tmp/out
+            /tmp/pyspy.svg

@@ -17,6 +17,9 @@
 #   PROFILE_SECONDS  seconds to profile (default 600)
 #   OUT              output directory (default /tmp/profile)
 #
+# The report in plain words (report.md) is written by profile_report.py, which
+# the workflow copies to /tmp/profile_report.py next to this script.
+#
 # A failing profiler never fails the stress test: this script only logs.
 
 set -u
@@ -94,7 +97,8 @@ if [ -z "$PID" ]; then
 fi
 
 log "pid=$PID cmdline=$(tr '\0' ' ' < "/proc/$PID/cmdline" | cut -c1-200)"
-log "VmRSS before: $(rss_kb "$PID") kB"
+RSS_BEFORE="$(rss_kb "$PID")"
+log "VmRSS before: ${RSS_BEFORE} kB"
 
 case "$PROFILER" in
     memray)
@@ -111,6 +115,11 @@ case "$PROFILER" in
                 memray flamegraph --force -o "$OUT/memray-flamegraph.html" "$OUT/memray.bin" >>"$LOG" 2>&1
                 memray stats "$OUT/memray.bin" >"$OUT/memray-stats.txt" 2>>"$LOG"
                 memray summary "$OUT/memray.bin" >"$OUT/memray-summary.txt" 2>>"$LOG"
+                # The same data with memory over time, to zoom in a browser.
+                memray flamegraph --temporal --force -o "$OUT/memray-temporal.html" "$OUT/memray.bin" >>"$LOG" 2>&1
+                python3 /tmp/profile_report.py memray "$OUT/memray.bin" \
+                    --rss-before "${RSS_BEFORE:-0}" --rss-after "$(rss_kb "$PID")" \
+                    --svg-dir "$OUT" >"$OUT/report.md" 2>>"$LOG"
             else
                 log "memray wrote no capture file"
                 status=1
@@ -125,6 +134,8 @@ case "$PROFILER" in
             --rate 20 --format flamegraph --output "$OUT/pyspy-flamegraph.svg" >>"$LOG" 2>&1
         status=$?
         py-spy dump --pid "$PID" >"$OUT/pyspy-dump.txt" 2>>"$LOG"
+        python3 /tmp/profile_report.py py-spy "$OUT/pyspy-flamegraph.svg" \
+            --seconds "$PROFILE_SECONDS" --rate 20 >"$OUT/report.md" 2>>"$LOG"
         ;;
     austin)
         # -C follows child processes; -x is the exposure time in seconds; -i

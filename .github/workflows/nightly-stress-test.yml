@@ -217,6 +217,7 @@ jobs:
             CONTAINER=salt-minion-1
           fi
           docker cp profile.sh "$CONTAINER":/tmp/profile.sh
+          docker cp profile_report.py "$CONTAINER":/tmp/profile_report.py
           docker exec -d \
             -e PROFILER="$PROFILER" -e TARGET="$PROFILE_TARGET" \
             -e DELAY="$WARMUP" -e PROFILE_SECONDS="$SECONDS_TO_PROFILE" \
@@ -261,6 +262,7 @@ jobs:
 
       - name: Analyze Results
         env:
+          STRESS_PROFILER: ${{ github.event.inputs.profiler || 'none' }}
           EXPECT_SALT_PROMETHEUS_METRICS: ${{ (github.event.inputs.enable_metrics == 'true' && github.event.inputs.metrics_exporter == 'prometheus') && '1' || '0' }}
         run: |
           cd tests/monitoring
@@ -445,9 +447,22 @@ jobs:
               echo
             fi
 
+            for name in memray-heap.svg memray-leaks.svg; do
+              if [ -s "$dir/$name" ] && [ -n "$URL_PREFIX" ]; then
+                echo "![${name%.svg}](${URL_PREFIX}profile/$name)"
+                echo
+              fi
+            done
+
+            # The report in plain words comes first.
+            if [ -s "$dir/report.md" ]; then
+              cat "$dir/report.md"
+              echo
+            fi
+
             for name in memray-summary.txt memray-stats.txt pyspy-dump.txt; do
               if [ -s "$dir/$name" ]; then
-                echo "<details open><summary>$name</summary>"
+                echo "<details><summary>$name (raw output of the tool)</summary>"
                 echo
                 echo '```'
                 head -n 40 "$dir/$name"

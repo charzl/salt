@@ -1,0 +1,40 @@
+
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃                                     ┃        ┃ Total ┃       ┃   Own ┃       ┃
+┃                                     ┃ <Total ┃ Memo… ┃   Own ┃ Memo… ┃ Allo… ┃
+┃ Location                            ┃ Memor… ┃     % ┃ Memo… ┃     % ┃ Count ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ <unknown> at <unknown>              │ 12.30… │ 99.9… │ 34.5… │ 0.28% │   542 │
+│ _PyEval_Vector at Python/ceval.c    │ 12.29… │ 99.8… │ 0.00… │ 0.00% │   543 │
+│ _PyObject_VectorcallTstate at       │ 12.28… │ 99.8… │ 0.00… │ 0.00% │   541 │
+│ ./Include/internal/pycore_call.h    │        │       │       │       │       │
+│ _PyEval_EvalFrame at                │ 12.24… │ 99.4… │ 0.00… │ 0.00% │   540 │
+│ ./Include/internal/pycore_ceval.h   │        │       │       │       │       │
+│ context_run at Python/context.c     │ 12.24… │ 99.4… │ 0.00… │ 0.00% │   538 │
+│ gen_send_ex2 at Objects/genobject.c │ 11.15… │ 90.6… │ 0.00… │ 0.00% │   504 │
+│ task_step_impl at                   │ 11.15… │ 90.6… │ 0.00… │ 0.00% │   504 │
+│ ./Modules/_asynciomodule.c          │        │       │       │       │       │
+│ task_step at                        │ 11.15… │ 90.6… │ 0.00… │ 0.00% │   504 │
+│ ./Modules/_asynciomodule.c          │        │       │       │       │       │
+│ _run at                             │ 11.15… │ 90.6… │ 0.00… │ 0.00% │   504 │
+│ /usr/local/lib/python3.14/asyncio/… │        │       │       │       │       │
+│ _run_once at                        │ 11.15… │ 90.6… │ 0.00… │ 0.00% │   504 │
+│ /usr/local/lib/python3.14/asyncio/… │        │       │       │       │       │
+│ run_forever at                      │ 11.15… │ 90.6… │ 0.00… │ 0.00% │   504 │
+│ /usr/local/lib/python3.14/asyncio/… │        │       │       │       │       │
+│ _PyObject_Malloc at                 │ 10.51… │ 85.4… │ 6.32… │ 51.3… │   492 │
+│ Objects/obmalloc.c                  │        │       │       │       │       │
+│ PyObject_Vectorcall at              │ 10.12… │ 82.2… │ 0.00… │ 0.00% │   173 │
+│ Objects/call.c                      │        │       │       │       │       │
+│ __bind at /app/salt/master.py       │ 8.668… │ 70.4… │ 0.00… │ 0.00% │   498 │
+│ run at /app/salt/master.py          │ 8.668… │ 70.4… │ 0.00… │ 0.00% │   498 │
+│ wrapped_run_func at                 │ 8.668… │ 70.4… │ 0.00… │ 0.00% │   498 │
+│ /app/salt/utils/process.py          │        │       │       │       │       │
+│ _bootstrap at                       │ 8.668… │ 70.4… │ 0.00… │ 0.00% │   498 │
+│ /usr/local/lib/python3.14/multipro… │        │       │       │       │       │
+│ _launch at                          │ 8.668… │ 70.4… │ 0.00… │ 0.00% │   498 │
+│ /usr/local/lib/python3.14/multipro… │        │       │       │       │       │
+│ __init__ at                         │ 8.668… │ 70.4… │ 0.00… │ 0.00% │   498 │
+│ /usr/local/lib/python3.14/multipro… │        │       │       │       │       │
+└─────────────────────────────────────┴────────┴───────┴───────┴───────┴───────┘

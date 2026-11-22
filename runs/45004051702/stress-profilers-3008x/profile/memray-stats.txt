@@ -1,0 +1,59 @@
+
+📏 Total allocations:
+	1563991
+
+📦 Total memory allocated:
+	13.957GB
+
+📈 Peak memory usage:
+	12.309MB
+
+📊 Histogram of allocation size:
+	min: 1.000B
+	---------------------------------------------
+	< 4.000B   : 120582 ▇▇▇▇▇
+	< 19.000B  :  48319 ▇▇
+	< 83.000B  : 260869 ▇▇▇▇▇▇▇▇▇▇
+	< 362.000B : 216384 ▇▇▇▇▇▇▇▇
+	< 1.583kB  : 717796 ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+	< 6.908kB  : 102909 ▇▇▇▇
+	< 30.150kB :  32258 ▇▇
+	< 131.579kB:  39394 ▇▇
+	< 574.229kB:  21911 ▇
+	<=2.506MB  :   3569 ▇
+	---------------------------------------------
+	max: 2.506MB
+
+📂 Allocator type distribution:
+	 MALLOC: 1373987
+	 CALLOC: 94245
+	 REALLOC: 90524
+	 MMAP: 5235
+
+🥇 Top 5 largest allocating locations (by size):
+	- packb:/usr/local/lib/python3.14/site-packages/msgpack/__init__.py:36 -> 7.391GB
+	- fopen:/app/salt/utils/files.py:617 -> 1.221GB
+	- _decode_embedded_dict:/app/salt/transport/frame.py:77 -> 570.014MB
+	- _refresh_file_mapping:/app/salt/loader/lazy.py:822 -> 503.226MB
+	- open:/usr/local/lib/python3.14/pathlib/__init__.py:771 -> 501.695MB
+
+🥇 Top 5 largest allocating locations (by number of allocations):
+	- _refresh_file_mapping:/app/salt/loader/lazy.py:822 -> 459987
+	- digest:/usr/local/lib/python3.14/hmac.py:199 -> 89278
+	- _init_openssl_hmac:/usr/local/lib/python3.14/hmac.py:116 -> 89278
+	- __forward_code__:/usr/local/lib/python3.14/annotationlib.py:287 -> 83680
+	- sub:/usr/local/lib/python3.14/re/__init__.py:208 -> 81802
+
+🥇 Top 5 allocating modules (by size):
+	- msgpack: 7.653GB total | 31770 allocations
+	- lazy: 1.325GB total | 594502 allocations
+	- files: 1.221GB total | 24430 allocations
+	- crypt: 811.782MB total | 240018 allocations
+	- frame: 707.290MB total | 13340 allocations
+
+🥇 Top 5 allocating modules (by number of allocations):
+	- lazy: 1.325GB total | 594502 allocations
+	- crypt: 811.782MB total | 240018 allocations
+	- entrypoints: 614.203MB total | 141987 allocations
+	- tornado: 431.056MB total | 126954 allocations
+	- rsax931: 17.176MB total | 64068 allocations

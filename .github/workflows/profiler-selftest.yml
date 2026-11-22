@@ -1,0 +1,77 @@
+name: Profiler self-test
+
+# Development only, on the profiler-selftest branch of the fork.  Runs a small
+# program that leaks on purpose under py-spy and memray, then the report
+# script, so the report can be tried in minutes instead of in a 30 minute
+# stress run.
+on:
+  push:
+    branches:
+      - profiler-selftest
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install the profilers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gdb
+          python -m pip install memray==1.20.0 py-spy==0.4.4
+
+      - name: Profile a program that leaks
+        run: |
+          cat > /tmp/demo.py <<'PY'
+          import hashlib
+          import threading
+          import time
+
+          CACHE = []
+
+
+          def remember(size):
+              CACHE.append(bytearray(size))
+
+
+          def leaky_loop():
+              while True:
+                  remember(50_000)
+                  time.sleep(0.02)
+
+
+          def burn():
+              data = b"x" * 1000
+              while True:
+                  for _ in range(2000):
+                      hashlib.sha256(data).digest()
+                  time.sleep(0.01)
+
+
+          threading.Thread(target=leaky_loop, daemon=True).start()
+          threading.Thread(target=burn, daemon=True).start()
+          while True:
+              time.sleep(1)
+          PY
+          python /tmp/demo.py &
+          PID=$!
+          sleep 5
+          sudo env "PATH=$PATH" py-spy record --pid "$PID" --duration 20 --rate 20 \
+            --format flamegraph --output /tmp/pyspy.svg
+          RSS_BEFORE=$(awk '/^VmRSS:/ {print $2}' "/proc/$PID/status")
+          sudo env "PATH=$PATH" memray attach --native --duration 30 -o /tmp/memray.bin "$PID"
+          sleep 40
+          RSS_AFTER=$(awk '/^VmRSS:/ {print $2}' "/proc/$PID/status")
+          kill "$PID"
+          ls -la /tmp/pyspy.svg /tmp/memray.bin
+          {
+            python tests/monitoring/profile_report.py memray /tmp/memray.bin \
+              --rss-before "$RSS_BEFORE" --rss-after "$RSS_AFTER"
+            echo
+            python tests/monitoring/profile_report.py py-spy /tmp/pyspy.svg --seconds 20 --rate 20
+          } | tee -a "$GITHUB_STEP_SUMMARY"

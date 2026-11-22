@@ -57,15 +57,17 @@ three profilers that attach to a running Salt process from the outside:
   `--leaks` flamegraph shows what was allocated during the window and is still
   alive. Slow, so use it for manual runs.
 - `py-spy`: sampling CPU profiler (flamegraph).
-- `austin`: sampling CPU profiler (raw `.austin` file).
+- `austin`: sampling CPU profiler. It writes a binary `.mojo` file, which the
+  Austin VS Code extension opens.
 
 In the `Nightly Stress Test` workflow, set `profiler` (`memray`, `austin` or
 `py-spy`) and `profile_target` (`master`, `mworker` for `MWorker-default-0`, or
-`minion`). `profile_minutes` is how long to profile. Profiling starts after the
+`minion`). The master's main process mostly supervises, so it allocates little:
+use `mworker` to look for memory growth. `profile_minutes` is how long to profile. Profiling starts after the
 10 minute warm-up, so it must fit in the run. It never changes pass or fail.
 
 The run's summary shows what can be read inline: the memray statistics and top
-allocators, the py-spy flamegraph, and the hottest Austin frames. The HTML
+allocators and the py-spy flamegraph. The HTML
 flamegraphs (`memray-leaks.html` shows what was allocated in the window and is
 still alive) and the raw captures are in the `profile` folder of the uploaded
 artifact. Download it and open the HTML in a browser; GitHub serves HTML from

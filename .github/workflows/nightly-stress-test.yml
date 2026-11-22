@@ -57,7 +57,10 @@ on:
           - austin
           - py-spy
       profile_target:
-        description: Process to profile when profiler is set
+        description: >
+          Process to profile when profiler is set.  master is the main process,
+          which mostly supervises; use mworker (MWorker-default-0) to look for
+          memory growth.
         required: false
         default: master
         type: choice
@@ -454,15 +457,8 @@ jobs:
               fi
             done
 
-            if [ -s "$dir/austin.austin" ]; then
-              echo "<details open><summary>austin: leaf frames by time</summary>"
-              echo
-              echo '```'
-              grep -v '^#' "$dir/austin.austin" \
-                | awk 'NF > 1 { n = $NF; $NF = ""; c = split($0, frames, ";"); sum[frames[c]] += n } END { for (f in sum) print sum[f], f }' \
-                | sort -rn | head -n 20
-              echo '```'
-              echo '</details>'
+            if [ -s "$dir/austin.mojo" ]; then
+              echo "Austin wrote \`austin.mojo\` ($(du -h "$dir/austin.mojo" | cut -f1)) in its binary MOJO format. Open it with the Austin VS Code extension; it is in the artifact."
               echo
             fi
 

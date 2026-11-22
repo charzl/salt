@@ -9,8 +9,10 @@
 #
 # Environment:
 #   PROFILER         memray | austin | py-spy
-#   TARGET           master (the master's main process), mworker
-#                    (MWorker-default-0) or minion (the minion's main process)
+#   TARGET           master (the master's main process, which mostly
+#                    supervises: use mworker to look for memory growth),
+#                    mworker (MWorker-default-0) or minion (the minion's
+#                    main process)
 #   DELAY            seconds to wait before profiling (default 600)
 #   PROFILE_SECONDS  seconds to profile (default 600)
 #   OUT              output directory (default /tmp/profile)
@@ -116,15 +118,20 @@ case "$PROFILER" in
         fi
         ;;
     py-spy)
-        # --subprocesses follows the workers forked by the master.
+        # --subprocesses follows the workers forked by the master.  At the
+        # default 100 samples a second py-spy falls behind with that many
+        # processes, so sample 20 times a second.
         py-spy record --pid "$PID" --duration "$PROFILE_SECONDS" --subprocesses \
-            --format flamegraph --output "$OUT/pyspy-flamegraph.svg" >>"$LOG" 2>&1
+            --rate 20 --format flamegraph --output "$OUT/pyspy-flamegraph.svg" >>"$LOG" 2>&1
         status=$?
         py-spy dump --pid "$PID" >"$OUT/pyspy-dump.txt" 2>>"$LOG"
         ;;
     austin)
-        # -C follows child processes; -x is the exposure time in seconds.
-        austin -C -x "$PROFILE_SECONDS" -p "$PID" -o "$OUT/austin.austin" >>"$LOG" 2>&1
+        # -C follows child processes; -x is the exposure time in seconds; -i
+        # is the sampling interval in microseconds (10 ms; the default of
+        # 100 us writes about 10 MB a minute for the master).  The output is
+        # in Austin's binary MOJO format.
+        austin -C -i 10000 -x "$PROFILE_SECONDS" -p "$PID" -o "$OUT/austin.mojo" >>"$LOG" 2>&1
         status=$?
         ;;
     *)

@@ -64,7 +64,8 @@ In the `Nightly Stress Test` workflow, set `profiler` (`memray`, `austin` or
 `py-spy`) and `profile_target` (`master`, `mworker` for `MWorker-default-0`, or
 `minion`). The master's main process mostly supervises, so it allocates little:
 use `mworker` to look for memory growth. `profile_minutes` is how long to profile. Profiling starts after the
-10 minute warm-up, so it must fit in the run. It never changes pass or fail.
+10 minute warm-up, so it must fit in the run. A profiler slows the process down,
+so in a profiling run the leak check only reports and never fails the run.
 
 The run's summary starts with a report in plain words (`report.md`, written by
 `profile_report.py`). For py-spy it says how much of the time is waiting and

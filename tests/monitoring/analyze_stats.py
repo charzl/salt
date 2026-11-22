@@ -242,6 +242,15 @@ def main():
         print("FAIL: Master file descriptor leak detected!")
         failed = True
 
+    if failed and os.environ.get("STRESS_PROFILER", "none") != "none":
+        # A profiler slows the process down and changes how its memory grows,
+        # so the slope of a profiling run does not say anything about a leak.
+        print(
+            f"NOTE: the checks above failed, but a profiler ({os.environ['STRESS_PROFILER']}) "
+            "was running, so the result is only informational."
+        )
+        failed = False
+
     if failed:
         sys.exit(1)
 

@@ -280,7 +280,7 @@ def memray_report(path, rss_before, rss_after):
             f"{readable(rss_after * 1024)} ({'+' if grew >= 0 else '-'}{readable(abs(grew) * 1024)}) "
             "over the same time."
         )
-        if grew > 0 and live_bytes < grew / 4:
+        if grew > 0 and live_bytes < grew * 1024 / 4:
             out.append(
                 "- The live allocations explain only a small part of the growth. The "
                 "rest is memory memray does not count as an allocation, for example "

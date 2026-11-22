@@ -1,4 +1,7 @@
-FROM python:3.10-slim
+# Keep the Python version in step with ``python_version`` in
+# cicd/shared-gh-workflows-context.yml, so the stress test runs the
+# interpreter that Salt is tested and shipped with.
+FROM python:3.14-slim
 
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -19,7 +22,7 @@ RUN apt-get update && apt-get install -y \
     libncurses-dev \
     && rm -rf /var/lib/apt/lists/*
 
-ARG PYTHON_VERSION=3.10.20
+ARG PYTHON_VERSION=3.14.10
 RUN cd /tmp && \
     wget -q https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz && \
     tar xf Python-${PYTHON_VERSION}.tar.xz && \
@@ -34,7 +37,12 @@ RUN cd /tmp && \
     ldconfig && \
     cd / && rm -rf /tmp/Python-${PYTHON_VERSION}*
 
-RUN pip install --no-cache-dir memray
+# Profilers for the optional ``profiler`` input of nightly-stress-test.yml,
+# driven by tests/monitoring/profile.sh.  Nothing runs them by default.
+#   memray    allocations with call stacks, including native frames
+#   py-spy    sampling CPU profiler, attaches from outside the process
+#   austin    sampling CPU profiler, attaches from outside the process
+RUN pip install --no-cache-dir memray==1.20.0 py-spy==0.4.4 austin-dist==4.1.0
 
 WORKDIR /app
 

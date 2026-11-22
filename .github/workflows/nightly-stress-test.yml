@@ -44,6 +44,34 @@ on:
         options:
           - otlp-http
           - prometheus
+      profiler:
+        description: >
+          Profile one process during the run.  Adds overhead (memray a lot),
+          so use it for manual runs only.  It never changes pass or fail.
+        required: false
+        default: none
+        type: choice
+        options:
+          - none
+          - memray
+          - austin
+          - py-spy
+      profile_target:
+        description: Process to profile when profiler is set
+        required: false
+        default: master
+        type: choice
+        options:
+          - master
+          - mworker
+          - minion
+      profile_minutes:
+        description: >
+          Minutes to profile when profiler is set.  Profiling starts after the
+          10 minute warm-up, so it must fit in the run.
+        required: false
+        default: '10'
+        type: string
 
 jobs:
   stress-test:
@@ -70,8 +98,16 @@ jobs:
             ${{ runner.os }}-buildx-${{ github.ref_name }}-
 
       - name: Build and Start Environment
+        env:
+          PROFILER: ${{ github.event.inputs.profiler || 'none' }}
         run: |
           cd tests/monitoring
+          if [ "$PROFILER" != "none" ]; then
+            # memray, Austin and py-spy attach from outside the process and
+            # need SYS_PTRACE in the container.  Only profiling runs get it.
+            echo "COMPOSE_FILE=docker-compose.yml:docker-compose.profiling.yml" >> "$GITHUB_ENV"
+            export COMPOSE_FILE=docker-compose.yml:docker-compose.profiling.yml
+          fi
           # The prometheus container runs as ``nobody`` (uid 65534) and
           # writes its TSDB to ``/prometheus``.  Without pre-creating the
           # bind-mount source with that ownership, Docker creates it
@@ -148,6 +184,43 @@ jobs:
         run: |
           docker exec salt-master salt '*' test.ping
 
+      - name: Start profiler
+        # Runs inside the container, in the background.  It waits for the
+        # warm-up (the same 10 minutes analyze_stats.py leaves out), profiles
+        # for ``profile_minutes`` and writes to /tmp/profile.  The result is
+        # copied out by ``Collect profile`` after the leak check, so the
+        # profiler cannot change the length of the analysis window.
+        if: github.event.inputs.profiler != '' && github.event.inputs.profiler != 'none'
+        continue-on-error: true
+        env:
+          PROFILER: ${{ github.event.inputs.profiler }}
+          PROFILE_TARGET: ${{ github.event.inputs.profile_target || 'master' }}
+          PROFILE_MINUTES: ${{ github.event.inputs.profile_minutes || '10' }}
+          DURATION: ${{ github.event.inputs.duration || '0.5h' }}
+        run: |
+          cd tests/monitoring
+          WARMUP=600
+          # Seconds in the run, from "30m" or "1.5h".
+          RUN_SECONDS=$(python3 -c "import sys; d = sys.argv[1]; print(int(float(d[:-1]) * (3600 if d.endswith('h') else 60)))" "$DURATION")
+          SECONDS_TO_PROFILE=$((PROFILE_MINUTES * 60))
+          # Leave two minutes at the end for the profiler to finish.
+          MAX_SECONDS=$((RUN_SECONDS - WARMUP - 120))
+          if [ "$SECONDS_TO_PROFILE" -gt "$MAX_SECONDS" ]; then
+            echo "profile_minutes=$PROFILE_MINUTES does not fit in a $DURATION run; using $((MAX_SECONDS / 60)) minutes"
+            SECONDS_TO_PROFILE=$MAX_SECONDS
+          fi
+          CONTAINER=salt-master
+          if [ "$PROFILE_TARGET" = "minion" ]; then
+            CONTAINER=salt-minion-1
+          fi
+          docker cp profile.sh "$CONTAINER":/tmp/profile.sh
+          docker exec -d \
+            -e PROFILER="$PROFILER" -e TARGET="$PROFILE_TARGET" \
+            -e DELAY="$WARMUP" -e PROFILE_SECONDS="$SECONDS_TO_PROFILE" \
+            -e OUT=/tmp/profile \
+            "$CONTAINER" bash /tmp/profile.sh
+          echo "Profiling $PROFILE_TARGET with $PROFILER for $((SECONDS_TO_PROFILE / 60)) minutes after ${WARMUP}s in $CONTAINER"
+
       - name: Run Aggressive Stress Test
         run: |
           cd tests/monitoring
@@ -204,6 +277,46 @@ jobs:
           python3 -m pip install --quiet matplotlib
           PANELS_DIR="${GITHUB_WORKSPACE}/artifacts/panels" \
             python3 render_panels.py
+
+      - name: Collect profile
+        # After Analyze Results on purpose, see ``Start profiler``.  Waits for
+        # profile.sh to finish (memray builds its reports at the end), then
+        # copies its output into artifacts/profile for the upload.
+        if: always() && github.event.inputs.profiler != '' && github.event.inputs.profiler != 'none'
+        continue-on-error: true
+        env:
+          PROFILE_TARGET: ${{ github.event.inputs.profile_target || 'master' }}
+        run: |
+          CONTAINER=salt-master
+          if [ "$PROFILE_TARGET" = "minion" ]; then
+            CONTAINER=salt-minion-1
+          fi
+          for _ in $(seq 1 60); do
+            if docker exec "$CONTAINER" test -f /tmp/profile/done; then
+              break
+            fi
+            sleep 10
+          done
+          mkdir -p artifacts/profile
+          docker cp "$CONTAINER":/tmp/profile/. artifacts/profile/
+          ls -la artifacts/profile
+          {
+            echo "### Profile (${{ github.event.inputs.profiler }}, ${PROFILE_TARGET})"
+            echo
+            echo "Exit status: \`$(cat artifacts/profile/exit_code 2>/dev/null || echo unknown)\`."
+            echo "Files are in the \`profile\` folder of the uploaded artifact:"
+            echo
+            for file in artifacts/profile/*; do
+              echo "- \`${file##*/}\`"
+            done
+            echo
+            echo '<details><summary>profile.log</summary>'
+            echo
+            echo '```'
+            tail -n 40 artifacts/profile/profile.log 2>/dev/null
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Snapshot Metrics
         if: always()

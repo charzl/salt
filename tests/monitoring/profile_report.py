@@ -149,7 +149,8 @@ def pyspy_report(path, seconds, rate):
     out.append(
         f"py-spy took **{total:,} samples**"
         + (
-            f" over {seconds // 60} minutes at {rate} a second"
+            f" over {seconds // 60 if seconds >= 120 else seconds} "
+            f"{'minutes' if seconds >= 120 else 'seconds'} at {rate} a second"
             if seconds and rate
             else ""
         )
@@ -230,6 +231,14 @@ def frame_text(frame):
     return f"{func} ({'/'.join(parts[-2:])}:{line})"
 
 
+def python_frame(frames):
+    """The nearest Python frame, leaf first (the native frames come before it)."""
+    for frame in frames:
+        if (frame[1] or "").endswith(".py"):
+            return frame_text(frame)
+    return None
+
+
 def salt_caller(frames):
     """The nearest frame in Salt's own code, leaf first."""
     for frame in frames:
@@ -293,7 +302,7 @@ def memray_report(path, rss_before, rss_after):
             frames = record.stack_trace(max_stacks=24)
         if not frames:
             continue
-        site = frame_text(frames[0])
+        site = python_frame(frames) or frame_text(frames[0])
         by_site[site][0] += record.size
         by_site[site][1] += record.n_allocations
         caller = salt_caller(frames)
@@ -316,8 +325,8 @@ def memray_report(path, rss_before, rss_after):
 
     table(
         "Where the live memory was allocated",
-        "The function that called the allocator. It is often a library, "
-        "for example a socket or a string function.",
+        "The nearest Python function on the stack of the allocation. It is "
+        "often a library, for example a socket or a string function.",
         by_site,
     )
     if by_salt:

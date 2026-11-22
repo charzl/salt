@@ -58,13 +58,16 @@ jobs:
           while True:
               time.sleep(1)
           PY
+          # Let a process of the same user attach, as root does in the stress
+          # container.
+          sudo sysctl -w kernel.yama.ptrace_scope=0
           python /tmp/demo.py &
           PID=$!
           sleep 5
-          sudo env "PATH=$PATH" py-spy record --pid "$PID" --duration 20 --rate 20 \
+          py-spy record --pid "$PID" --duration 20 --rate 20 \
             --format flamegraph --output /tmp/pyspy.svg
           RSS_BEFORE=$(awk '/^VmRSS:/ {print $2}' "/proc/$PID/status")
-          sudo env "PATH=$PATH" memray attach --native --duration 30 -o /tmp/memray.bin "$PID"
+          memray attach --native --duration 30 -o /tmp/memray.bin "$PID"
           sleep 40
           RSS_AFTER=$(awk '/^VmRSS:/ {print $2}' "/proc/$PID/status")
           kill "$PID"

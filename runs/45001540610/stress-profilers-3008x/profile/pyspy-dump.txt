@@ -1,0 +1,14 @@
+Process 15: /usr/local/bin/python3.14 /usr/local/bin/salt-master -d MainProcess
+Python v3.14.10 (/usr/local/bin/python3.14)
+
+Thread 15 (idle): "MainThread"
+    EpollSelector.select (selectors.py:452)
+    BaseEventLoop._run_once (asyncio/base_events.py:2026)
+    BaseEventLoop.run_forever (asyncio/base_events.py:678)
+    BaseEventLoop.run_until_complete (asyncio/base_events.py:707)
+    Runner.run (asyncio/runners.py:128)
+    run (asyncio/runners.py:205)
+    Master.start (salt/master.py:1345)
+    Master.start (salt/cli/daemons.py:226)
+    salt_master (salt/scripts.py:134)
+    <module> (salt-master:6)

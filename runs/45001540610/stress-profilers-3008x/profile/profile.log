@@ -1,0 +1,17 @@
+[2026-11-22T08:15:28Z] profiler=py-spy target=master delay=600s duration=600s python=Python 3.14.10
+[2026-11-22T08:25:28Z] pid=15 cmdline=/usr/local/bin/python3.14 /usr/local/bin/salt-master -d MainProcess 
+[2026-11-22T08:25:28Z] VmRSS before: 66580 kB
+py-spy> Sampling process 20 times a second for 600 seconds. Press Control-C to exit.
+
+py-spy> Wrote flamegraph data to '/tmp/profile/pyspy-flamegraph.svg'. Samples: 19155 Errors: 0
+[2026-11-22T08:35:38Z] profiler exit status: 0
+[2026-11-22T08:35:38Z] VmRSS after: 66580 kB
+total 200
+drwxr-xr-x 2 root root   4096 Nov 22 08:35 .
+drwxrwxrwt 1 root root   4096 Nov 22 08:15 ..
+-rw-r--r-- 1 root root      2 Nov 22 08:35 exit_code
+-rw-r--r-- 1 root root    526 Nov 22 08:35 profile.log
+-rw-r--r-- 1 root root    605 Nov 22 08:35 pyspy-dump.txt
+-rw-r--r-- 1 root root 178263 Nov 22 08:35 pyspy-flamegraph.svg
+-rw-r--r-- 1 root root   2643 Nov 22 08:35 report.md
+[2026-11-22T08:35:38Z] done

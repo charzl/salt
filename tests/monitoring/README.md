@@ -66,8 +66,12 @@ In the `Nightly Stress Test` workflow, set `profiler` (`memray`, `austin` or
 use `mworker` to look for memory growth. `profile_minutes` is how long to profile. Profiling starts after the
 10 minute warm-up, so it must fit in the run. It never changes pass or fail.
 
-The run's summary shows what can be read inline: the memray statistics and top
-allocators and the py-spy flamegraph. The HTML
+The run's summary starts with a report in plain words (`report.md`, written by
+`profile_report.py`). For py-spy it says how much of the time is waiting and
+which functions use the CPU. For memray it says how much memory was allocated
+in the window and is still alive, and which Python and Salt code asked for it.
+Each table says how to read it. The raw output of the tool and the py-spy
+flamegraph follow. The HTML
 flamegraphs (`memray-leaks.html` shows what was allocated in the window and is
 still alive) and the raw captures are in the `profile` folder of the uploaded
 artifact. Download it and open the HTML in a browser; GitHub serves HTML from

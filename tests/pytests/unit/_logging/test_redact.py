@@ -281,3 +281,47 @@ def test_register_does_not_raise_when_the_pillar_cannot_be_walked(monkeypatch, c
     with caplog.at_level(logging.WARNING, logger=redact.log.name):
         redact.register({"a": "first-secret"})
     assert "RecursionError" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "    ",
+        "\n\n\n\n",
+        " \t \t ",
+        "----",
+        "....",
+        "====",
+        "-=-=",
+        "- - - -",
+        "////",
+        "\\\\\\\\",
+        "_____",
+    ],
+)
+def test_indents_and_separators_are_not_registered(value):
+    redact.register({"x": value})
+    text = f"a{value}b"
+    assert redact.redact(text) == text
+
+
+@pytest.mark.parametrize("value", ["!@#$", "aaaa", "0000", "a-b-c-d"])
+def test_other_short_values_are_still_registered(value):
+    redact.register({"x": value})
+    assert redact.redact(f"x {value} y") == f"x {redact.REDACT_PLACEHOLDER} y"
+
+
+def test_trailing_newline_of_a_yaml_block_does_not_hide_the_value():
+    import salt.utils.yaml
+
+    pillar = salt.utils.yaml.safe_load("password: |\n  hunter2-secret\n")
+    assert pillar["password"] == "hunter2-secret\n"
+    redact.register(pillar)
+    assert redact.redact("pw is hunter2-secret") == "pw is **********"
+    # The newline in the text is kept.
+    assert redact.redact("pw hunter2-secret\nnext") == "pw **********\nnext"
+
+
+def test_value_with_only_a_short_part_left_after_stripping_is_not_registered():
+    redact.register({"x": "ab\n\n"})
+    assert redact.redact("ab\n\n") == "ab\n\n"

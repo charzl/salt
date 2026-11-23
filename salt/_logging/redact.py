@@ -35,6 +35,10 @@ WITHHELD = "[log message withheld: pillar redaction failed]"
 # Shorter values (``1``, ``yes``, ...) would redact ordinary text.
 MIN_VALUE_LENGTH = 4
 
+# A value made only of these characters is an indent or a separator, not a
+# secret, and redacting it would hit every line that has one.
+SEPARATOR_CHARS = frozenset(" \t\r\n\f\v-_=.*#~+|/\\")
+
 _MISSING = object()
 
 _lock = threading.Lock()
@@ -86,6 +90,21 @@ def _iter_values(data, _seen=None):
         _seen.discard(id(data))
 
 
+def _registrable(value):
+    """
+    Return the part of ``value`` that is registered, or ``None`` if the value
+    is not worth redacting.
+
+    Leading and trailing whitespace is dropped: a YAML ``|`` block ends with a
+    newline that the log text does not have, and leaving it in would keep the
+    value from matching.
+    """
+    value = value.strip()
+    if len(value) < MIN_VALUE_LENGTH or set(value) <= SEPARATOR_CHARS:
+        return None
+    return value
+
+
 def register(pillar):
     """
     Add the string values found in ``pillar`` to the values that are redacted.
@@ -98,7 +117,11 @@ def register(pillar):
     """
     global _pattern  # pylint: disable=global-statement
     try:
-        found = {v for v in _iter_values(pillar) if len(v) >= MIN_VALUE_LENGTH}
+        found = {
+            value
+            for value in map(_registrable, _iter_values(pillar))
+            if value is not None
+        }
         with _lock:
             new = found - _values
             if not new:

@@ -2,8 +2,11 @@
 Tests for salt._logging.redact and its use by the Salt log handlers.
 """
 
+import datetime
 import io
 import logging
+import re
+import types
 
 import pytest
 
@@ -116,3 +119,165 @@ def test_log_output_is_untouched_when_nothing_is_registered(log_output):
     logger, stream = log_output
     logger.debug("password %s", "hunter2-secret")
     assert "hunter2-secret" in stream.getvalue()
+
+
+HEADER_FORMAT = "%(asctime)s,%(msecs)03d [%(name)-14s][%(levelname)-8s] %(message)s"
+
+
+@pytest.fixture
+def header_output():
+    """
+    A logger whose lines have the time, the logger name and the level in front
+    of the message, as the Salt log file does.
+    """
+    stream = io.StringIO()
+    handler = StreamHandler(stream)
+    handler.setFormatter(logging.Formatter(HEADER_FORMAT, "%Y-%m-%d %H:%M:%S"))
+    logger = logging.getLogger("salt.minion")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    logger.addHandler(handler)
+    try:
+        yield logger, stream
+    finally:
+        logger.removeHandler(handler)
+
+
+def test_only_the_message_is_redacted_not_the_header(header_output):
+    logger, stream = header_output
+    today = datetime.date.today().isoformat()
+    # Values that also appear in the time and in the logger name.
+    redact.register({"date": today, "pkg": "salt", "pw": "hunter2-secret"})
+    logger.info("login with %s as salt", "hunter2-secret")
+    line = stream.getvalue().strip()
+    header, _, message = line.partition("] ")
+    assert line.startswith(today)
+    assert "salt.minion" in line
+    assert "[INFO" in line
+    assert message.endswith("login with ********** as **********")
+
+
+def test_traceback_is_redacted_and_the_header_is_not(header_output):
+    logger, stream = header_output
+    redact.register({"pkg": "salt", "pw": "hunter2-secret"})
+    try:
+        raise RuntimeError("bad hunter2-secret")
+    except RuntimeError:
+        logger.exception("boom")
+    output = stream.getvalue()
+    assert "[salt.minion " in output
+    assert "RuntimeError: bad **********" in output
+    assert "hunter2-secret" not in output
+
+
+def test_record_is_restored_after_it_was_formatted():
+    redact.register(PILLAR)
+    handler = StreamHandler(io.StringIO())
+    record = logging.LogRecord(
+        "x", logging.INFO, __file__, 1, "pw %s", ("hunter2-secret",), None
+    )
+    handler.format(record)
+    assert record.msg == "pw %s"
+    assert record.args == ("hunter2-secret",)
+    # The next handler starts from the original record and redacts it too.
+    other = StreamHandler(io.StringIO())
+    other.setFormatter(logging.Formatter("%(message)s"))
+    assert other.format(record) == "pw **********"
+
+
+def test_colormsg_format_is_redacted():
+    stream = io.StringIO()
+    handler = StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(colormsg)s"))
+    logger = logging.getLogger("salt.tests.redact.color")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    logger.addHandler(handler)
+    redact.register(PILLAR)
+    logger.debug("pw %s", "hunter2-secret")
+    assert "hunter2-secret" not in stream.getvalue()
+    assert "**********" in stream.getvalue()
+
+
+class _BrokenPattern:
+    def sub(self, *args, **kwargs):
+        raise RuntimeError("it failed on hunter2-secret")
+
+
+def test_failing_redaction_withholds_the_message_but_keeps_the_line(
+    header_output, monkeypatch, capsys
+):
+    logger, stream = header_output
+    redact.register(PILLAR)
+    monkeypatch.setattr(redact, "_pattern", _BrokenPattern())
+    logger.info("login with %s", "hunter2-secret")
+    line = stream.getvalue().strip()
+    assert "[INFO" in line
+    assert redact.WITHHELD in line
+    assert "hunter2-secret" not in line
+    # Reported once, and without the text of the error.
+    err = capsys.readouterr().err
+    assert "RuntimeError" in err
+    assert "hunter2-secret" not in err
+    logger.info("again %s", "hunter2-secret")
+    assert capsys.readouterr().err == ""
+    assert stream.getvalue().count(redact.WITHHELD) == 2
+
+
+def test_failing_redaction_withholds_the_traceback(header_output, monkeypatch):
+    logger, stream = header_output
+    redact.register(PILLAR)
+    monkeypatch.setattr(redact, "_pattern", _BrokenPattern())
+    try:
+        raise RuntimeError("bad hunter2-secret")
+    except RuntimeError:
+        logger.exception("boom")
+    output = stream.getvalue()
+    assert redact.WITHHELD in output
+    assert "hunter2-secret" not in output
+
+
+def test_malformed_log_call_is_left_to_the_logging_module():
+    redact.register(PILLAR)
+    record = logging.LogRecord(
+        "x", logging.INFO, __file__, 1, "needs %s and %s", ("one",), None
+    )
+    assert redact.redact_record(record) is None
+    assert record.msg == "needs %s and %s"
+    assert record.args == ("one",)
+
+
+def test_redact_of_text_does_not_raise(monkeypatch):
+    redact.register(PILLAR)
+    monkeypatch.setattr(redact, "_pattern", _BrokenPattern())
+    assert redact.redact("pw hunter2-secret") == redact.WITHHELD
+
+
+def test_register_does_not_raise_when_the_pattern_cannot_be_built(monkeypatch, caplog):
+    redact.register({"a": "first-secret"})
+
+    def broken_compile(*args, **kwargs):
+        raise RuntimeError("it failed on second-secret")
+
+    fake_re = types.SimpleNamespace(compile=broken_compile, escape=re.escape)
+    monkeypatch.setattr(redact, "re", fake_re)
+    with caplog.at_level(logging.WARNING, logger=redact.log.name):
+        redact.register({"b": "second-secret"})
+    assert "RuntimeError" in caplog.text
+    assert "second-secret" not in caplog.text
+    # What was registered before still works, and the failed value was not kept.
+    assert redact.redact("first-secret second-secret") == "********** second-secret"
+    # A later registration works again.
+    monkeypatch.undo()
+    redact.register({"b": "second-secret"})
+    assert redact.redact("first-secret second-secret") == "********** **********"
+
+
+def test_register_does_not_raise_when_the_pillar_cannot_be_walked(monkeypatch, caplog):
+    def broken_walk(*args, **kwargs):
+        raise RecursionError("too deep")
+
+    monkeypatch.setattr(redact, "_iter_values", broken_walk)
+    with caplog.at_level(logging.WARNING, logger=redact.log.name):
+        redact.register({"a": "first-secret"})
+    assert "RecursionError" in caplog.text

@@ -6,6 +6,7 @@ import datetime
 import io
 import logging
 import re
+import sys
 import types
 
 import pytest
@@ -325,3 +326,98 @@ def test_trailing_newline_of_a_yaml_block_does_not_hide_the_value():
 def test_value_with_only_a_short_part_left_after_stripping_is_not_registered():
     redact.register({"x": "ab\n\n"})
     assert redact.redact("ab\n\n") == "ab\n\n"
+
+
+class _CountingPattern:
+    def __init__(self, real):
+        self.real = real
+        self.calls = 0
+
+    def sub(self, repl, text):
+        self.calls += 1
+        return self.real.sub(repl, text)
+
+
+def _plain_handler():
+    handler = StreamHandler(io.StringIO())
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    return handler
+
+
+def _record(msg="pw %s", args=("hunter2-secret",), exc_info=None):
+    return logging.LogRecord("x", logging.INFO, __file__, 1, msg, args, exc_info)
+
+
+def test_a_record_is_scanned_once_however_many_handlers_get_it(monkeypatch):
+    redact.register(PILLAR)
+    counting = _CountingPattern(redact._pattern)
+    monkeypatch.setattr(redact, "_pattern", counting)
+
+    handlers = [_plain_handler() for _ in range(3)]
+    record = _record()
+    assert [h.format(record) for h in handlers] == ["pw **********"] * 3
+    calls_for_three_handlers = counting.calls
+
+    counting.calls = 0
+    _plain_handler().format(_record())
+    assert calls_for_three_handlers == counting.calls
+
+
+def test_new_registration_makes_the_kept_result_invalid():
+    redact.register({"a": "first-secret"})
+    first, second = _plain_handler(), _plain_handler()
+    record = _record("x %s %s", ("first-secret", "second-secret"))
+    assert first.format(record) == "x ********** second-secret"
+    redact.register({"b": "second-secret"})
+    assert second.format(record) == "x ********** **********"
+
+
+def test_traceback_that_was_formatted_earlier_is_redacted_too():
+    redact.register(PILLAR)
+    try:
+        raise RuntimeError("bad hunter2-secret")
+    except RuntimeError:
+        exc_info = sys.exc_info()
+    record = _record("boom", (), exc_info)
+    # As if a handler that does not redact had formatted the traceback first.
+    record.exc_text = (
+        "Traceback (most recent call last):\nRuntimeError: bad hunter2-secret"
+    )
+    output = _plain_handler().format(record)
+    assert "RuntimeError: bad **********" in output
+    assert "hunter2-secret" not in output
+
+
+def test_what_is_kept_on_the_record_is_plain_data():
+    redact.register(PILLAR)
+    record = _record()
+    _plain_handler().format(record)
+    kept = getattr(record, "_pillar_redaction")
+    assert all(isinstance(item, (int, str, type(None))) for item in kept)
+
+
+def test_colormsg_is_redacted_without_scanning_it_again(monkeypatch):
+    redact.register(PILLAR)
+    counting = _CountingPattern(redact._pattern)
+    monkeypatch.setattr(redact, "_pattern", counting)
+    stream = io.StringIO()
+    handler = StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(colormsg)s"))
+    logger = logging.getLogger("salt.tests.redact.color.once")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    logger.addHandler(handler)
+    logger.debug("pw %s", "hunter2-secret")
+    assert "hunter2-secret" not in stream.getvalue()
+    assert "**********" in stream.getvalue()
+    # Only the message was scanned.
+    assert counting.calls == 1
+
+
+def test_colormsg_that_does_not_contain_the_message_is_scanned_itself():
+    redact.register(PILLAR)
+    record = _record()
+    record.colormsg = "other text with hunter2-secret"
+    handler = StreamHandler(io.StringIO())
+    handler.setFormatter(logging.Formatter("%(colormsg)s"))
+    assert handler.format(record) == "other text with **********"

@@ -44,7 +44,13 @@ _MISSING = object()
 _lock = threading.Lock()
 _values = set()
 _pattern = None
+# Changes whenever the registered values change, so that a result that was kept
+# on a record is only used while it is still valid.
+_generation = 0
 _redact_failure_reported = False
+
+# The attribute of a log record that keeps its redacted fields.
+_CACHE_ATTR = "_pillar_redaction"
 
 
 def _report_redact_failure(exc):
@@ -115,7 +121,7 @@ def register(pillar):
     This does not raise. If the values cannot be registered, a warning is
     logged and the values registered so far stay in place.
     """
-    global _pattern  # pylint: disable=global-statement
+    global _pattern, _generation  # pylint: disable=global-statement
     try:
         found = {
             value
@@ -135,6 +141,7 @@ def register(pillar):
             )
             _values.update(new)
             _pattern = pattern
+            _generation += 1
     except Exception as exc:  # pylint: disable=broad-except
         # Only the type of the error: its text could contain a value.
         log.warning(
@@ -148,10 +155,12 @@ def clear():
     """
     Forget all registered values.
     """
-    global _pattern, _redact_failure_reported  # pylint: disable=global-statement
+    global _pattern, _generation  # pylint: disable=global-statement
+    global _redact_failure_reported  # pylint: disable=global-statement
     with _lock:
         _values.clear()
         _pattern = None
+        _generation += 1
         _redact_failure_reported = False
 
 
@@ -172,12 +181,67 @@ def redact(text):
         return WITHHELD
 
 
+def _redacted_fields(record, pattern, generation):
+    """
+    Redact the message, the ``colormsg`` the Salt records carry, the stack and
+    the traceback of ``record``. Returns the fields to keep on the record, or
+    ``None`` if the message cannot be formatted.
+
+    A traceback that a handler formatted earlier is on the record already, so
+    it is redacted as well, not only one that is formatted here.
+    """
+    try:
+        message = record.getMessage()
+    except Exception:  # pylint: disable=broad-except
+        # A malformed log call: leave it to the logging module to report it.
+        return None
+    colormsg = getattr(record, "colormsg", None)
+    stack_info = record.stack_info
+    try:
+        redacted = pattern.sub(REDACT_PLACEHOLDER, message)
+        if colormsg and message and message in colormsg:
+            # The Salt records build ``colormsg`` around the message, so the
+            # message can be replaced in it without scanning it again.
+            colormsg = colormsg.replace(message, redacted)
+        elif colormsg:
+            colormsg = pattern.sub(REDACT_PLACEHOLDER, colormsg)
+        fields = (
+            generation,
+            redacted,
+            colormsg,
+            pattern.sub(REDACT_PLACEHOLDER, stack_info) if stack_info else stack_info,
+        )
+        if record.exc_info:
+            # Keeping the redacted text on the record makes the formatter use
+            # it instead of formatting the traceback again.
+            record.exc_text = pattern.sub(
+                REDACT_PLACEHOLDER,
+                record.exc_text or logging.Formatter().formatException(record.exc_info),
+            )
+    except Exception as exc:  # pylint: disable=broad-except
+        _report_redact_failure(exc)
+        # Keep the line, but do not write anything that was not checked.
+        fields = (
+            generation,
+            WITHHELD,
+            WITHHELD if colormsg else colormsg,
+            WITHHELD if stack_info else stack_info,
+        )
+        if record.exc_info:
+            record.exc_text = WITHHELD
+    return fields
+
+
 def redact_record(record):
     """
     Redact the message and the traceback of a log record, in place.
 
     The time, the logger name and the level are not touched, because they are
     added by the formatter from other attributes of the record.
+
+    The redacted fields are kept on the record, so a record that goes to
+    several handlers is scanned once. They are used again for as long as the
+    registered values have not changed.
 
     Returns what ``restore_record`` needs, or ``None`` when the record was left
     as it was. The record is meant to be restored after it has been formatted,
@@ -186,39 +250,23 @@ def redact_record(record):
     pattern = _pattern
     if pattern is None:
         return None
-    try:
-        message = record.getMessage()
-    except Exception:  # pylint: disable=broad-except
-        # A malformed log call: leave it to the logging module to report it.
-        return None
+    generation = _generation
+    fields = getattr(record, _CACHE_ATTR, None)
+    if fields is None or fields[0] != generation:
+        fields = _redacted_fields(record, pattern, generation)
+        if fields is None:
+            return None
+        setattr(record, _CACHE_ATTR, fields)
     saved = (
         record.msg,
         record.args,
         getattr(record, "colormsg", _MISSING),
         record.stack_info,
     )
-    try:
-        record.msg = pattern.sub(REDACT_PLACEHOLDER, message)
-        record.args = ()
-        if saved[2] is not _MISSING:
-            record.colormsg = pattern.sub(REDACT_PLACEHOLDER, saved[2])
-        if record.stack_info:
-            record.stack_info = pattern.sub(REDACT_PLACEHOLDER, record.stack_info)
-        if record.exc_info and not record.exc_text:
-            # Formatting the traceback here makes the formatter reuse it.
-            record.exc_text = pattern.sub(
-                REDACT_PLACEHOLDER, logging.Formatter().formatException(record.exc_info)
-            )
-    except Exception as exc:  # pylint: disable=broad-except
-        _report_redact_failure(exc)
-        # Keep the line, but do not write anything that was not checked.
-        record.msg, record.args = WITHHELD, ()
-        if saved[2] is not _MISSING:
-            record.colormsg = WITHHELD
-        if record.stack_info:
-            record.stack_info = WITHHELD
-        if record.exc_info:
-            record.exc_text = WITHHELD
+    record.msg, record.args = fields[1], ()
+    if fields[2] is not None:
+        record.colormsg = fields[2]
+    record.stack_info = fields[3]
     return saved
 
 

@@ -826,12 +826,8 @@ VALID_OPTS = immutabletypes.freeze(
         "pillar_source_merging_strategy": str,
         # Recursively merge lists by aggregating them instead of replacing them.
         "pillar_merge_lists": bool,
-        # pr-70413-alt (boundary-redaction prototype): master switch for
-        # masking pillar values in log records.  When False (the
-        # prototype default), the PillarRedactingFilter is a
-        # zero-cost passthrough.  When True, every pillar leaf value
-        # (>= 4 characters) is redacted wherever it appears in any
-        # log record emitted by any logger.
+        # Feature flag: redact the pillar values from log output.
+        # Does not affect pillar function results or job returns.
         "pillar_mask_output": bool,
         # If True, values from included pillar SLS targets will override
         "pillar_includes_override_sls": bool,
@@ -1344,9 +1340,6 @@ DEFAULT_MINION_OPTS = immutabletypes.freeze(
         "pillar_opts": False,
         "pillar_source_merging_strategy": "smart",
         "pillar_merge_lists": False,
-        # pr-70413-alt boundary-redaction prototype: default to False
-        # (3007.x behavior).  Operator opts in by flipping to True and
-        # declaring the sensitive keys/paths below.
         "pillar_mask_output": False,
         "pillar_includes_override_sls": False,
         # ``pillar_cache``, ``pillar_cache_ttl``, ``pillar_cache_backend``,
@@ -1839,7 +1832,6 @@ DEFAULT_MASTER_OPTS = immutabletypes.freeze(
         "pillar_safe_render_error": True,
         "pillar_source_merging_strategy": "smart",
         "pillar_merge_lists": False,
-        # pr-70413-alt boundary-redaction prototype defaults.
         "pillar_mask_output": False,
         "pillar_includes_override_sls": False,
         "pillar_cache": False,

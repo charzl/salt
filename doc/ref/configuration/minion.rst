@@ -2902,6 +2902,47 @@ minion config file or via the CLI, it will override this option.
 
     pillarenv_from_saltenv: True
 
+.. conf_minion:: pillar_mask_output
+
+``pillar_mask_output``
+----------------------
+
+.. versionadded:: 3008.3
+
+Default: ``False``
+
+Redact pillar values from log output.
+
+When ``False`` (the default), logging is unchanged.
+
+When ``True``, the pillar a process receives is registered, and every value in
+it that is a string of at least four characters is replaced by ``**********``
+in the log output of Salt's log handlers: the console, log files and syslog.
+The message and the traceback of logged exceptions are changed, the time, the
+logger name and the level are not. It does not matter how the value got into
+the message, whether inside a printed pillar dictionary, a command line or a
+diff. Numbers, booleans and shorter strings are not redacted, because they
+would also match ordinary text. A value that is also ordinary text, such as a
+user name, is redacted everywhere it appears in the message.
+
+Only the log output changes. The ``pillar`` functions, job returns and the
+output of the CLI always contain the real values, and the ``unmask`` argument of
+the ``pillar`` functions has no effect. Handlers that are not Salt's own, such
+as the :ref:`external log handlers <external-logging-handlers>`, are not covered.
+
+.. versionchanged:: 3008.4
+    The default is now ``False`` and the option only affects log output. Before,
+    the default was ``True``, and the ``pillar`` functions returned masked
+    values unless ``unmask=True`` was passed.
+
+This option does **not** change ``no_log``. It is an explicit per-state
+setting rather than pillar masking, so a state with ``no_log: True`` still has
+its ``name``, ``comment`` and ``changes`` redacted.
+
+.. code-block:: yaml
+
+    pillar_mask_output: True
+
 .. conf_minion:: pillar_raise_on_missing
 
 ``pillar_raise_on_missing``

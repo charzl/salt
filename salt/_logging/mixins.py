@@ -10,6 +10,7 @@ import sys
 import weakref
 
 import salt._logging
+import salt._logging.redact
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +79,18 @@ class ExcInfoOnLogLevelFormatMixin:
 
     def format(self, record):
         """
+        Format the log record. The registered pillar values are redacted from
+        its message and traceback, but not from the time, the logger name or
+        the level that the formatter adds.
+        """
+        saved = salt._logging.redact.redact_record(record)
+        try:
+            return self._format_record(record)
+        finally:
+            salt._logging.redact.restore_record(record, saved)
+
+    def _format_record(self, record):
+        """
         Format the log record to include exc_info if the handler is enabled for a specific log level
         """
         formatted_record = super().format(record)
@@ -109,8 +122,8 @@ class ExcInfoOnLogLevelFormatMixin:
                 self.formatter is None
             ):  # pylint: disable=access-member-before-definition
                 self.formatter = logging._defaultFormatter
-            record.exc_info_on_loglevel_formatted = self.formatter.formatException(
-                record.exc_info_on_loglevel_instance
+            record.exc_info_on_loglevel_formatted = salt._logging.redact.redact(
+                self.formatter.formatException(record.exc_info_on_loglevel_instance)
             )
 
         # Let's format the record to include exc_info just like python's logging formatted does

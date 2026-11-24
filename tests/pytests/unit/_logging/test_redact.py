@@ -2,16 +2,23 @@
 Tests for salt._logging.redact and its use by the Salt log handlers.
 """
 
+import collections
 import datetime
+import decimal
 import io
+import ipaddress
 import logging
 import re
 import sys
 import types
+import uuid
 
 import pytest
 
 import salt._logging.redact as redact
+import salt.utils.immutabletypes
+import salt.utils.odict
+import salt.utils.secret
 from salt._logging.handlers import StreamHandler
 
 PILLAR = {
@@ -421,3 +428,83 @@ def test_colormsg_that_does_not_contain_the_message_is_scanned_itself():
     handler = StreamHandler(io.StringIO())
     handler.setFormatter(logging.Formatter("%(colormsg)s"))
     assert handler.format(record) == "other text with **********"
+
+
+SECRET_TEXT = "type-secret-value"
+
+SUPPORTED_PILLARS = {
+    "dict": {"a": SECRET_TEXT},
+    "list": ["x", SECRET_TEXT],
+    "tuple": ("x", SECRET_TEXT),
+    "set": {SECRET_TEXT},
+    "frozenset": frozenset({SECRET_TEXT}),
+    "deque": collections.deque([SECRET_TEXT]),
+    "nested": {"a": [{"b": (SECRET_TEXT,)}]},
+    "salt OrderedDict": salt.utils.odict.OrderedDict(a=SECRET_TEXT),
+    "MaskedDict": salt.utils.secret.hide({"a": SECRET_TEXT}),
+    "frozen dict": salt.utils.immutabletypes.freeze({"a": SECRET_TEXT}),
+    "frozen list": salt.utils.immutabletypes.freeze([SECRET_TEXT]),
+    "mapping that is not a dict": types.MappingProxyType({"a": SECRET_TEXT}),
+    "bytes": {"a": SECRET_TEXT.encode()},
+    "bytearray": {"a": bytearray(SECRET_TEXT.encode())},
+}
+
+
+@pytest.mark.parametrize("pillar", SUPPORTED_PILLARS.values(), ids=SUPPORTED_PILLARS)
+def test_supported_types_are_registered(pillar, caplog):
+    with caplog.at_level(logging.WARNING, logger=redact.log.name):
+        redact.register(pillar)
+    assert redact.redact(f"x {SECRET_TEXT} y") == "x ********** y"
+    assert caplog.text == ""
+
+
+@pytest.mark.parametrize("value", [1234567, 1.5, True, None])
+def test_numbers_booleans_and_none_are_skipped_without_a_warning(value, caplog):
+    with caplog.at_level(logging.WARNING, logger=redact.log.name):
+        redact.register({"a": value, "b": SECRET_TEXT})
+    assert caplog.text == ""
+    assert redact.redact("x 1234567 y") == "x 1234567 y"
+
+
+class _Custom:
+    def __str__(self):
+        return "custom-secret-value"
+
+
+UNSUPPORTED_VALUES = {
+    "decimal.Decimal": decimal.Decimal("123456.789"),
+    "uuid.UUID": uuid.UUID("12345678-1234-5678-1234-567812345678"),
+    "datetime.datetime": datetime.datetime(2026, 11, 23, 10, 11, 12),
+    "datetime.date": datetime.date(2026, 11, 23),
+    "ipaddress.IPv4Address": ipaddress.ip_address("203.0.113.77"),
+    f"{__name__}._Custom": _Custom(),
+}
+
+
+@pytest.mark.parametrize(
+    "type_name,value", UNSUPPORTED_VALUES.items(), ids=UNSUPPORTED_VALUES
+)
+def test_other_types_are_skipped_with_one_warning_naming_the_type(
+    type_name, value, caplog
+):
+    with caplog.at_level(logging.WARNING, logger=redact.log.name):
+        redact.register({"a": value, "b": SECRET_TEXT})
+        redact.register({"a": value, "b": SECRET_TEXT})
+    assert caplog.text.count(type_name) == 1
+    # The warning does not contain the value.
+    assert str(value) not in caplog.text
+    # The other values in the same pillar are still registered.
+    assert redact.redact(f"x {SECRET_TEXT} y") == "x ********** y"
+
+
+def test_every_unsupported_type_in_one_pillar_is_named_in_one_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger=redact.log.name):
+        redact.register({"a": decimal.Decimal("1.5"), "b": uuid.uuid4()})
+    assert len(caplog.records) == 1
+    assert "decimal.Decimal" in caplog.text
+    assert "uuid.UUID" in caplog.text
+
+
+def test_value_inside_an_unsupported_type_is_not_walked():
+    redact.register({"a": _Custom()})
+    assert redact.redact("x custom-secret-value y") == "x custom-secret-value y"

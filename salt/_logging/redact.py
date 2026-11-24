@@ -19,6 +19,7 @@ This module only uses the standard library, so the logging code can import it
 without a cycle.
 """
 
+import collections.abc
 import logging
 import re
 import sys
@@ -39,6 +40,9 @@ MIN_VALUE_LENGTH = 4
 # secret, and redacting it would hit every line that has one.
 SEPARATOR_CHARS = frozenset(" \t\r\n\f\v-_=.*#~+|/\\")
 
+# Types that hold no text to redact. They are skipped without a word.
+_IGNORED_TYPES = (bool, int, float, type(None))
+
 _MISSING = object()
 
 _lock = threading.Lock()
@@ -48,6 +52,8 @@ _pattern = None
 # on a record is only used while it is still valid.
 _generation = 0
 _redact_failure_reported = False
+# The types that were reported as not supported, so each is reported once.
+_reported_types = set()
 
 # The attribute of a log record that keeps its redacted fields.
 _CACHE_ATTR = "_pillar_redaction"
@@ -72,16 +78,27 @@ def _report_redact_failure(exc):
         pass
 
 
-def _iter_values(data, _seen=None):
+def _iter_values(data, unsupported, _seen=None):
     """
     Yield the string and bytes leaves of nested pillar data.
+
+    Strings and bytes are read, mappings and the sequences and sets are walked.
+    Numbers, booleans and ``None`` are skipped. The name of any other type is
+    added to ``unsupported``.
     """
-    if isinstance(data, bytes):
-        data = data.decode("utf-8", "ignore")
+    if isinstance(data, (bytes, bytearray)):
+        data = bytes(data).decode("utf-8", "ignore")
     if isinstance(data, str):
         yield data
         return
-    if not isinstance(data, (dict, list, tuple, set, frozenset)):
+    if isinstance(data, _IGNORED_TYPES):
+        return
+    if isinstance(data, collections.abc.Mapping):
+        items = data.values()
+    elif isinstance(data, (collections.abc.Sequence, collections.abc.Set)):
+        items = data
+    else:
+        unsupported.add(f"{type(data).__module__}.{type(data).__qualname__}")
         return
     if _seen is None:
         _seen = set()
@@ -89,11 +106,25 @@ def _iter_values(data, _seen=None):
         return
     _seen.add(id(data))
     try:
-        items = data.values() if isinstance(data, dict) else data
         for item in items:
-            yield from _iter_values(item, _seen)
+            yield from _iter_values(item, unsupported, _seen)
     finally:
         _seen.discard(id(data))
+
+
+def _report_unsupported(type_names):
+    """
+    Log once for each type of pillar value that cannot be redacted. Only the
+    names of the types are logged, never a value.
+    """
+    with _lock:
+        new = type_names - _reported_types
+        _reported_types.update(new)
+    if new:
+        log.warning(
+            "Pillar values of these types are not redacted from log output: %s.",
+            ", ".join(sorted(new)),
+        )
 
 
 def _registrable(value):
@@ -123,11 +154,13 @@ def register(pillar):
     """
     global _pattern, _generation  # pylint: disable=global-statement
     try:
+        unsupported = set()
         found = {
             value
-            for value in map(_registrable, _iter_values(pillar))
+            for value in map(_registrable, _iter_values(pillar, unsupported))
             if value is not None
         }
+        _report_unsupported(unsupported)
         with _lock:
             new = found - _values
             if not new:
@@ -162,6 +195,7 @@ def clear():
         _pattern = None
         _generation += 1
         _redact_failure_reported = False
+        _reported_types.clear()
 
 
 def redact(text):

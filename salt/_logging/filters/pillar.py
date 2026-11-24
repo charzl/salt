@@ -158,46 +158,26 @@ class PillarRedactingFilter(logging.Filter):
                 self._compile()
             if self._regex is None:
                 return True
-            self._redact(record)
+            if isinstance(record.msg, str):
+                record.msg = self._regex.sub(REDACT_PLACEHOLDER, record.msg)
+            record.args = self._scrub(record.args)
         except Exception:  # pylint: disable=broad-except
             # A bug in redaction must never silence logging.
             return True
         return True
 
-    def _sub(self, text):
-        return self._regex.sub(REDACT_PLACEHOLDER, text)
-
-    def _redact(self, record):
-        """Redact the message and the traceback of ``record``, in place.
-
-        The message is formatted first. An argument can be an object, such as
-        an exception, whose text only exists once the message is formatted, so
-        looking at the arguments is not enough. The record then holds the
-        redacted message and no arguments.
-
-        The same is done for the text a record carries besides the message:
-        ``colormsg`` of the Salt records, the stack, and the traceback, which a
-        handler would otherwise format after this filter has run.
-        """
-        record.msg = self._sub(record.getMessage())
-        record.args = ()
-        colormsg = getattr(record, "colormsg", None)
-        if colormsg:
-            record.colormsg = self._sub(colormsg)
-        if record.stack_info:
-            record.stack_info = self._sub(record.stack_info)
-        if record.exc_info:
-            record.exc_text = self._sub(
-                record.exc_text or logging.Formatter().formatException(record.exc_info)
-            )
-        # The traceback that a record made with ``exc_info_on_loglevel`` adds
-        # for the handlers that are enabled for it, see
-        # ``salt._logging.mixins.ExcInfoOnLogLevelFormatMixin``.
-        instance = getattr(record, "exc_info_on_loglevel_instance", None)
-        if instance and getattr(record, "exc_info_on_loglevel_formatted", None) is None:
-            record.exc_info_on_loglevel_formatted = self._sub(
-                logging.Formatter().formatException(instance)
-            )
+    def _scrub(self, obj):
+        if self._regex is None or obj is None:
+            return obj
+        if isinstance(obj, str):
+            return self._regex.sub(REDACT_PLACEHOLDER, obj)
+        if isinstance(obj, bytes):
+            return self._regex.sub(REDACT_PLACEHOLDER, obj.decode(errors="replace"))
+        if isinstance(obj, dict):
+            return {k: self._scrub(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(self._scrub(v) for v in obj)
+        return obj
 
 
 def install_on_handler(handler, opts):

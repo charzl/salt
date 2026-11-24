@@ -38,11 +38,6 @@ MIN_VALUE_LENGTH = 4
 # secret, and redacting it would hit every line that has one.
 SEPARATOR_CHARS = frozenset(" \t\r\n\f\v-_=.*#~+|/\\")
 
-# The attributes of a log record that hold the text of the message. ``colormsg``
-# is only on the Salt records: they fill it when they are created, and a console
-# format with ``%(colormsg)s`` writes it.
-TEXT_ATTRIBUTES = ("msg", "colormsg")
-
 # Written in place of a message that could not be checked, so that a value is
 # never written because the check failed.
 WITHHELD = "[log message withheld: pillar redaction failed]"
@@ -196,20 +191,22 @@ class PillarRedactingFilter(logging.Filter):
                 self._compile()
             if self._regex is None:
                 return True
-            for name in TEXT_ATTRIBUTES:
-                value = getattr(record, name, None)
-                if isinstance(value, str):
-                    setattr(record, name, self._regex.sub(REDACT_PLACEHOLDER, value))
+            if isinstance(record.msg, str):
+                record.msg = self._regex.sub(REDACT_PLACEHOLDER, record.msg)
             record.args = self._scrub(record.args)
+            # The Salt records also keep the message as text in ``colormsg``,
+            # made when the record was created, and a console format with
+            # ``%(colormsg)s`` writes that.
+            if getattr(record, "colormsg", None):
+                record.colormsg = self._scrub(record.colormsg)
         except Exception as exc:  # pylint: disable=broad-except
             # A bug in redaction must never silence logging, and it must not
             # let a message through that was not checked either: keep the
             # line and withhold the message.
             _report_failure(exc)
-            for name in TEXT_ATTRIBUTES:
-                if getattr(record, name, None):
-                    setattr(record, name, WITHHELD)
-            record.args = ()
+            record.msg, record.args = WITHHELD, ()
+            if getattr(record, "colormsg", None):
+                record.colormsg = WITHHELD
             return True
         return True
 

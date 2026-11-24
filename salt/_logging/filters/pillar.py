@@ -28,8 +28,16 @@ import logging
 import re
 import threading
 
+log = logging.getLogger(__name__)
+
 REDACT_PLACEHOLDER = "**********"
 MIN_VALUE_LENGTH = 4
+
+# Pillar values registered by the code that compiles the pillar, see register().
+_registry_lock = threading.Lock()
+_registered = set()
+# Changes whenever a value is added, so that a filter knows to rebuild its regex.
+_generation = 0
 
 
 def _flatten_scalars(value, out):
@@ -56,14 +64,51 @@ def _flatten_scalars(value, out):
             out.append(s)
 
 
+def register(pillar):
+    """Add the leaf values of ``pillar`` to the values every filter redacts.
+
+    ``setup_logging()`` gives a filter a frozen copy of the config that was
+    made at start-up, when the pillar is still empty, so a filter cannot read
+    a pillar that is compiled later. The code that compiles the pillar calls
+    this instead. Values are only added, never dropped.
+
+    This does not raise. If the values cannot be registered, a warning is
+    logged.
+    """
+    global _generation  # pylint: disable=global-statement
+    try:
+        values = []
+        _flatten_scalars(pillar, values)
+        with _registry_lock:
+            new = set(values) - _registered
+            if new:
+                _registered.update(new)
+                _generation += 1
+    except Exception as exc:  # pylint: disable=broad-except
+        # Only the type of the error: its text could contain a value.
+        log.warning(
+            "Could not register the pillar values for log redaction (%s). "
+            "Log output may contain them.",
+            type(exc).__name__,
+        )
+
+
+def clear():
+    """Forget the registered values."""
+    global _generation  # pylint: disable=global-statement
+    with _registry_lock:
+        _registered.clear()
+        _generation += 1
+
+
 class PillarRedactingFilter(logging.Filter):
     """Redact every pillar leaf value from outbound log records.
 
     Install with ``install_on_handler(handler, opts)``. The filter
     reads ``opts["pillar_mask_output"]`` and ``opts["pillar"]`` at
-    construction time; the pillar snapshot is refreshed lazily when
-    ``id(opts["pillar"])`` changes (which occurs on every
-    ``saltutil.refresh_pillar``).
+    construction time, and the values added with ``register()``. The
+    snapshot is refreshed lazily when ``id(opts["pillar"])`` changes or a
+    value is registered.
     """
 
     def __init__(self, opts=None):
@@ -73,6 +118,7 @@ class PillarRedactingFilter(logging.Filter):
         self._enabled = bool(self._opts.get("pillar_mask_output", False))
         self._regex = None
         self._snapshot_id = None
+        self._snapshot_generation = None
         self._compile()
 
     def refresh(self):
@@ -85,6 +131,9 @@ class PillarRedactingFilter(logging.Filter):
         pillar = self._opts.get("pillar") or {}
         values = []
         _flatten_scalars(pillar, values)
+        with _registry_lock:
+            values.extend(_registered)
+            generation = _generation
         # De-dup; order longest-first so compound values redact before
         # their own prefixes would.
         uniq = sorted(set(values), key=len, reverse=True)
@@ -93,14 +142,19 @@ class PillarRedactingFilter(logging.Filter):
         else:
             self._regex = None
         self._snapshot_id = id(pillar)
+        self._snapshot_generation = generation
 
     def filter(self, record):
         # Fast path: feature off.
         if not self._enabled:
             return True
         try:
-            # Opportunistic refresh if opts["pillar"] was rebound.
-            if id(self._opts.get("pillar")) != self._snapshot_id:
+            # Opportunistic refresh if opts["pillar"] was rebound or a value
+            # was registered.
+            if (
+                id(self._opts.get("pillar")) != self._snapshot_id
+                or _generation != self._snapshot_generation
+            ):
                 self._compile()
             if self._regex is None:
                 return True

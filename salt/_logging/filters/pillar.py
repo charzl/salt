@@ -26,12 +26,22 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import threading
 
 log = logging.getLogger(__name__)
 
 REDACT_PLACEHOLDER = "**********"
 MIN_VALUE_LENGTH = 4
+
+# A value made only of these characters is an indent or a separator, not a
+# secret, and redacting it would hit every line that has one.
+SEPARATOR_CHARS = frozenset(" \t\r\n\f\v-_=.*#~+|/\\")
+
+# Written in place of a message that could not be checked, so that a value is
+# never written because the check failed.
+WITHHELD = "[log message withheld: pillar redaction failed]"
+_failure_reported = False
 
 # Pillar values registered by the code that compiles the pillar, see register().
 _registry_lock = threading.Lock()
@@ -56,12 +66,34 @@ def _flatten_scalars(value, out):
         if not value:
             return
         s = value.decode(errors="replace") if isinstance(value, bytes) else value
-        if len(s) >= MIN_VALUE_LENGTH:
+        # A YAML ``|`` block ends with a newline that the log text does not
+        # have, so the value is registered without surrounding whitespace.
+        s = s.strip()
+        if len(s) >= MIN_VALUE_LENGTH and not set(s) <= SEPARATOR_CHARS:
             out.append(s)
     elif isinstance(value, (int, float)):
         s = str(value)
         if len(s) >= MIN_VALUE_LENGTH:
             out.append(s)
+
+
+def _report_failure(exc):
+    """Say once, on stderr, that a record could not be redacted.
+
+    This must not use logging: it runs inside a log handler. Only the type of
+    the error is written, its text could contain a value.
+    """
+    global _failure_reported  # pylint: disable=global-statement
+    if _failure_reported:
+        return
+    _failure_reported = True
+    try:
+        sys.stderr.write(
+            f"salt: pillar redaction of a log record failed ({type(exc).__name__}); "
+            "such messages are withheld\n"
+        )
+    except Exception:  # pylint: disable=broad-except
+        pass
 
 
 def register(pillar):
@@ -95,10 +127,11 @@ def register(pillar):
 
 def clear():
     """Forget the registered values."""
-    global _generation  # pylint: disable=global-statement
+    global _generation, _failure_reported  # pylint: disable=global-statement
     with _registry_lock:
         _registered.clear()
         _generation += 1
+    _failure_reported = False
 
 
 class PillarRedactingFilter(logging.Filter):
@@ -161,8 +194,12 @@ class PillarRedactingFilter(logging.Filter):
             if isinstance(record.msg, str):
                 record.msg = self._regex.sub(REDACT_PLACEHOLDER, record.msg)
             record.args = self._scrub(record.args)
-        except Exception:  # pylint: disable=broad-except
-            # A bug in redaction must never silence logging.
+        except Exception as exc:  # pylint: disable=broad-except
+            # A bug in redaction must never silence logging, and it must not
+            # let a message through that was not checked either: keep the
+            # line and withhold the message.
+            _report_failure(exc)
+            record.msg, record.args = WITHHELD, ()
             return True
         return True
 

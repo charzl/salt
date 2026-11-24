@@ -117,3 +117,59 @@ def test_a_failure_while_building_the_regex_withholds_the_message(monkeypatch):
     record = _record(f"password is {SECRET}")
     assert flt.filter(record) is True
     assert record.msg == WITHHELD
+
+
+def _salt_record(msg="pw %s", args=(SECRET,)):
+    from salt._logging.impl import SaltColorLogRecord
+
+    return SaltColorLogRecord("x", logging.INFO, __file__, 1, msg, args, None)
+
+
+def test_colormsg_of_a_salt_record_is_redacted():
+    record = _salt_record()
+    assert SECRET in record.colormsg
+    _filter({"k": SECRET}).filter(record)
+    assert SECRET not in record.colormsg
+    assert REDACT_PLACEHOLDER in record.colormsg
+    # The color codes around the message are kept.
+    assert record.colormsg.startswith("\x1b[")
+
+
+def test_a_console_format_with_colormsg_is_redacted():
+    import io
+
+    from salt._logging.handlers import StreamHandler
+
+    stream = io.StringIO()
+    handler = StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(colorlevel)s %(colormsg)s"))
+    handler.addFilter(_filter({"k": SECRET}))
+    handler.handle(_salt_record())
+    assert SECRET not in stream.getvalue()
+    assert REDACT_PLACEHOLDER in stream.getvalue()
+
+
+def test_a_record_without_colormsg_is_fine():
+    record = _record("pw %s", (SECRET,))
+    assert not hasattr(record, "colormsg")
+    _filter({"k": SECRET}).filter(record)
+    assert record.getMessage() == f"pw {REDACT_PLACEHOLDER}"
+
+
+def test_a_failure_withholds_the_colormsg_too(monkeypatch):
+    flt = _filter({"k": SECRET})
+    record = _salt_record()
+
+    calls = []
+    original = flt._scrub
+
+    def fail_on_colormsg(obj):
+        calls.append(obj)
+        if isinstance(obj, str) and "\x1b[" in obj:
+            raise RuntimeError("synthetic failure")
+        return original(obj)
+
+    monkeypatch.setattr(flt, "_scrub", fail_on_colormsg)
+    assert flt.filter(record) is True
+    assert record.msg == WITHHELD
+    assert record.colormsg == WITHHELD

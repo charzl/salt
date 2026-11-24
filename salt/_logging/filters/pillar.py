@@ -194,12 +194,19 @@ class PillarRedactingFilter(logging.Filter):
             if isinstance(record.msg, str):
                 record.msg = self._regex.sub(REDACT_PLACEHOLDER, record.msg)
             record.args = self._scrub(record.args)
+            # The Salt records also keep the message as text in ``colormsg``,
+            # made when the record was created, and a console format with
+            # ``%(colormsg)s`` writes that.
+            if getattr(record, "colormsg", None):
+                record.colormsg = self._scrub(record.colormsg)
         except Exception as exc:  # pylint: disable=broad-except
             # A bug in redaction must never silence logging, and it must not
             # let a message through that was not checked either: keep the
             # line and withhold the message.
             _report_failure(exc)
             record.msg, record.args = WITHHELD, ()
+            if getattr(record, "colormsg", None):
+                record.colormsg = WITHHELD
             return True
         return True
 

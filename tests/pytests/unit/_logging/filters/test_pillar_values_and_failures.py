@@ -160,16 +160,11 @@ def test_a_failure_withholds_the_colormsg_too(monkeypatch):
     flt = _filter({"k": SECRET})
     record = _salt_record()
 
-    calls = []
-    original = flt._scrub
+    def boom(*args, **kwargs):
+        raise RuntimeError("synthetic failure")
 
-    def fail_on_colormsg(obj):
-        calls.append(obj)
-        if isinstance(obj, str) and "\x1b[" in obj:
-            raise RuntimeError("synthetic failure")
-        return original(obj)
-
-    monkeypatch.setattr(flt, "_scrub", fail_on_colormsg)
+    monkeypatch.setattr(flt, "_scrub", boom)
     assert flt.filter(record) is True
     assert record.msg == WITHHELD
     assert record.colormsg == WITHHELD
+    assert SECRET not in record.colormsg

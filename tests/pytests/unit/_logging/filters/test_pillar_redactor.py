@@ -69,19 +69,24 @@ class TestContentMatch:
         flt = self._filter({"api": {"token": "s3cr3tt0k3n"}})
         record = _make_record("token %s", args=("s3cr3tt0k3n",))
         flt.filter(record)
-        assert record.args == (REDACT_PLACEHOLDER,)
+        # The message is formatted and redacted, and no arguments are left.
+        assert record.getMessage() == f"token {REDACT_PLACEHOLDER}"
+        assert record.args == ()
 
     def test_redacts_nested_dict_leaves(self):
         flt = self._filter(
             {"app": {"db": {"password": "topsecret"}, "token": "beartoken"}}
         )
         record = _make_record(
-            "topsecret and beartoken appear", args=({"nested": "beartoken"},)
+            "topsecret and beartoken appear, %s", args=({"nested": "beartoken"},)
         )
         flt.filter(record)
         assert "topsecret" not in record.msg
         assert "beartoken" not in record.msg
-        assert record.args[0]["nested"] == REDACT_PLACEHOLDER
+        assert record.msg == (
+            f"{REDACT_PLACEHOLDER} and {REDACT_PLACEHOLDER} appear, "
+            f"{{'nested': '{REDACT_PLACEHOLDER}'}}"
+        )
 
     def test_redacts_list_leaves(self):
         flt = self._filter({"certs": ["cert_aaaaaa", "cert_bbbbbb"]})
@@ -192,7 +197,7 @@ class TestBehaviorAlwaysReturnsTrue:
         def boom(*args, **kwargs):
             raise RuntimeError("synthetic filter bug")
 
-        monkeypatch.setattr(flt, "_scrub", boom)
+        monkeypatch.setattr(flt, "_redact", boom)
         record = _make_record("normalval", args=({"a": "normalval"},))
         # Must not raise; must return True; record may be partially
         # scrubbed or unchanged.
